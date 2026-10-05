@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Dispecerat Național 112 - Simulator România</title>
-  
+
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -138,7 +138,7 @@
       </div>
 
       <div class="bg-slate-950/80 px-4 py-1.5 rounded-lg border border-slate-800 flex items-center gap-3">
-        <i class="fa-solid fa-[#ef4444] fa-phone-volume text-red-500 text-lg animate-bounce"></i>
+        <i class="fa-solid fa-phone-volume text-red-500 text-lg animate-bounce"></i>
         <div>
           <div class="text-[10px] text-slate-400 uppercase font-semibold">Apeluri Active</div>
           <div id="display-missions-count" class="font-orbitron font-bold text-red-400 text-base">0</div>
@@ -164,10 +164,10 @@
 
   <!-- Main Workspace -->
   <div class="flex-1 relative flex overflow-hidden">
-    
+
     <!-- Sidebar Panel (Misiuni, Subunitati, Configurare) -->
     <aside id="sidebar" class="absolute md:relative z-20 left-0 top-0 h-full w-full sm:w-96 bg-slate-900/95 border-r border-slate-800 flex flex-col transition-transform duration-300 -translate-x-full md:translate-x-0">
-      
+
       <!-- Tab Header -->
       <div class="flex border-b border-slate-800 bg-slate-950/60 p-1">
         <button onclick="switchTab('missions')" id="tab-btn-missions" class="flex-1 py-2.5 text-xs font-semibold rounded-lg bg-slate-800 text-cyan-400 flex items-center justify-center gap-2 transition">
@@ -213,7 +213,7 @@
 
       <!-- Tab Content 3: Setari & Filtru Distanta Slider -->
       <div id="tab-content-settings" class="hidden flex-1 overflow-y-auto p-4 space-y-6">
-        
+
         <!-- Slider Distanta Misiuni Maxima (1 - 150 km) -->
         <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-800 space-y-3">
           <div class="flex justify-between items-center">
@@ -266,7 +266,7 @@
 
     <!-- Map Container Area -->
     <main class="flex-1 relative bg-slate-950">
-      
+
       <!-- Leaflet Map Canvas -->
       <div id="map" class="w-full h-full z-10"></div>
 
@@ -360,7 +360,7 @@
         <!-- Compartments Multiple Checkboxes -->
         <div class="space-y-2 pt-1">
           <span class="block text-xs text-slate-300 font-medium">Compartimente & Echipamente Secundare:</span>
-          
+
           <label class="flex items-center justify-between p-2.5 rounded-lg bg-slate-900 border border-slate-800 cursor-pointer hover:border-slate-700">
             <div class="flex items-center gap-2">
               <input type="checkbox" id="chk-mod-stingere" checked onchange="updateFireTruckPrice()" class="rounded bg-slate-800 border-slate-700 text-cyan-500 focus:ring-0">
@@ -443,6 +443,122 @@
     };
 
     /* =========================================================================
+       GEO HELPERS & CONSTANTE DE SIMULARE
+       ========================================================================= */
+    // Acceleratie de simulare: 60x timp real. O ruta de 25 km la 70 km/h
+    // (21 min real) se parcurge in ~21 secunde de joc.
+    const SIM_SPEED_MULTIPLIER = 60;
+
+    // Viteze medii urbane (km/h) per tip de echipaj.
+    const VEHICLE_SPEEDS = { police: 70, smurd: 65, fire_custom: 50 };
+
+    // Fereastra de raspuns pentru un apel 112 (secunde reale).
+    const MISSION_TIMEOUT_SEC = 150;
+
+    // Procentul din recompensa pierdut cand un apel expira nerezolvat.
+    const MISSION_FAIL_PENALTY = 0.5;
+
+    const MAX_VEHICLES_PER_STATION = 10;
+
+    // Selectiile din dropdown-urile de dispecerizare (missionId -> vehicleId).
+    // Nu se persista, dar supravietuiesc re-randarilor listei.
+    let dispatchSelections = {};
+
+    const EARTH_R = 6371; // km
+
+    function haversineKm(lat1, lng1, lat2, lng2) {
+      const toRad = d => (d * Math.PI) / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLng = toRad(lng2 - lng1);
+      const a = Math.sin(dLat / 2) ** 2 +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+      return 2 * EARTH_R * Math.asin(Math.sqrt(a));
+    }
+
+    // Punct aleator distribuit uniform in discul de raza radiusKm
+    // (sqrt e obligatoriu, altfel se aglomereaza in centru).
+    function randomPointInRadius(lat, lng, radiusKm) {
+      const r = radiusKm * Math.sqrt(Math.random());
+      const angle = Math.random() * 2 * Math.PI;
+      const lngScale = Math.max(Math.cos((lat * Math.PI) / 180), 0.01);
+      const dLat = (r * Math.cos(angle)) / 111.32;
+      const dLng = (r * Math.sin(angle)) / (111.32 * lngScale);
+      return [lat + dLat, lng + dLng];
+    }
+
+    function nearestStationInfo(lat, lng) {
+      let best = null;
+      let bestKm = Infinity;
+      state.stations.forEach(s => {
+        const d = haversineKm(lat, lng, s.lat, s.lng);
+        if (d < bestKm) { bestKm = d; best = s; }
+      });
+      return { station: best, km: bestKm };
+    }
+
+    // Distante cumulative (km) pe o ruta [[lat,lng], ...] + totalul.
+    function buildRouteMetrics(route) {
+      const cum = [0];
+      for (let i = 1; i < route.length; i++) {
+        cum.push(cum[i - 1] + haversineKm(route[i - 1][0], route[i - 1][1], route[i][0], route[i][1]));
+      }
+      return { cum: cum, totalKm: cum.length ? cum[cum.length - 1] : 0 };
+    }
+
+    // Avanseaza vehiculul pe ruta cu `speedKmh` pe durata `dtSec` de timp real.
+    // Viteza e constanta in km/h indiferent de cate puncte are ruta.
+    // Returneaza true daca a ajuns la capatul rutei.
+    function advanceVehicleAlongRoute(vehicle, dtSec) {
+      const route = vehicle.route;
+      const cum = vehicle.routeCum;
+      if (!route || route.length < 2 || !cum || cum.length < 2) return true;
+
+      const totalKm = cum[cum.length - 1];
+      const speedKmh = vehicle.speedKmh || 60;
+      const simKm = (speedKmh * SIM_SPEED_MULTIPLIER * dtSec) / 3600;
+      const travelled = (vehicle.distKm || 0) + simKm;
+
+      if (travelled >= totalKm) {
+        vehicle.distKm = totalKm;
+        vehicle.segIdx = route.length - 1;
+        vehicle.lat = route[route.length - 1][0];
+        vehicle.lng = route[route.length - 1][1];
+        return true;
+      }
+
+      vehicle.distKm = travelled;
+
+      let i = vehicle.segIdx || 0;
+      while (i < cum.length - 2 && cum[i + 1] < travelled) i++;
+      while (i > 0 && cum[i] > travelled) i--;
+      vehicle.segIdx = i;
+
+      const segLen = cum[i + 1] - cum[i];
+      const t = segLen > 0 ? (travelled - cum[i]) / segLen : 0;
+      vehicle.lat = route[i][0] + (route[i + 1][0] - route[i][0]) * t;
+      vehicle.lng = route[i][1] + (route[i + 1][1] - route[i][1]) * t;
+      return false;
+    }
+
+    // Seteaza ruta + metricile de distanta, resetand progresul.
+    function setVehicleRoute(vehicle, route) {
+      vehicle.route = route;
+      const m = buildRouteMetrics(route);
+      vehicle.routeCum = m.cum;
+      vehicle.routeTotalKm = m.totalKm;
+      vehicle.distKm = 0;
+      vehicle.segIdx = 0;
+      vehicle.routeIdx = 0;
+      vehicle.lat = route[0][0];
+      vehicle.lng = route[0][1];
+    }
+
+    // Timp estimat de deplasare (secunde reale de joc).
+    function etaSeconds(totalKm, speedKmh) {
+      return (totalKm / (speedKmh * SIM_SPEED_MULTIPLIER)) * 3600;
+    }
+
+    /* =========================================================================
        WEB AUDIO SYNTHESIZER ENGINE
        ========================================================================= */
     const AudioEngine = {
@@ -450,12 +566,39 @@
       muted: false,
       init() {
         if (!this.ctx) {
-          this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+          const AC = window.AudioContext || window.webkitAudioContext;
+          if (!AC) return null;
+          this.ctx = new AC();
         }
+        // Chrome/Safari suspenda contextul pana la primul gest al utilizatorului.
+        if (this.ctx.state === 'suspended' && this.ctx.resume) {
+          this.ctx.resume().catch(() => {});
+        }
+        return this.ctx;
+      },
+      // Ton descendent pentru apelurile 112 expirate nerezolvate.
+      playTimeoutTone() {
+        if (this.muted) return;
+        this.init();
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        [440, 330, 220].forEach((freq, i) => {
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = 'square';
+          osc.frequency.value = freq;
+          gain.gain.setValueAtTime(0.10, now + i * 0.18);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.18 + 0.18);
+          osc.connect(gain);
+          gain.connect(this.ctx.destination);
+          osc.start(now + i * 0.18);
+          osc.stop(now + i * 0.18 + 0.2);
+        });
       },
       playDispatchAlert() {
         if (this.muted) return;
         this.init();
+        if (!this.ctx) return;
         const now = this.ctx.currentTime;
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
@@ -472,6 +615,7 @@
       playSirenTone() {
         if (this.muted) return;
         this.init();
+        if (!this.ctx) return;
         const now = this.ctx.currentTime;
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
@@ -489,6 +633,7 @@
       playSuccessChime() {
         if (this.muted) return;
         this.init();
+        if (!this.ctx) return;
         const now = this.ctx.currentTime;
         [523.25, 659.25, 783.99].forEach((freq, i) => {
           const osc = this.ctx.createOscillator();
@@ -524,10 +669,72 @@
     window.onload = function() {
       loadSavedState();
       initMap();
+      recoverStuckVehicles();
       renderUI();
+      renderMapElements();
       startGameLoop();
       startCallGeneratorTimer();
+      startTimersLoop();
+      unlockAudioListeners();
     };
+
+    // Deblocheaza AudioContext la primul gest al utilizatorului (anti-autoplay policy).
+    function unlockAudioListeners() {
+      const unlock = () => AudioEngine.init();
+      window.addEventListener('pointerdown', unlock, { once: true, capture: true });
+      window.addEventListener('keydown', unlock, { once: true, capture: true });
+      window.addEventListener('touchstart', unlock, { once: true, capture: true });
+    }
+
+    // Repara starile ramase agatate dupa un reload (F5 in timpul unei interventii).
+    // Fara asta, un echipaj ajuns pe scena ramanea blocat pe 'on_scene' pentru totdeauna.
+    function recoverStuckVehicles() {
+      let changed = false;
+      const liveMissionIds = new Set(state.missions.map(m => m.id));
+
+      state.vehicles.forEach(v => {
+        if (v.missionId && !liveMissionIds.has(v.missionId)) {
+          v.missionId = null;
+          if (v.status !== 'on_scene') v.status = 'idle';
+          changed = true;
+        }
+
+        if (v.status === 'on_scene') {
+          // Timerul de interventie traia doar in memorie -> il relansam.
+          setTimeout(() => completeMissionWork(v.id), 4000);
+        } else if (v.status === 'dispatched' || v.status === 'returning') {
+          if (v.route && v.route.length > 1) {
+            // Ruta a fost persistata -> reconstruim distantele cumulative.
+            const metrics = buildRouteMetrics(v.route);
+            v.routeCum = metrics.cum;
+            v.routeTotalKm = metrics.totalKm;
+            v.distKm = v.distKm || 0;
+            v.segIdx = v.segIdx || 0;
+            advanceVehicleAlongRoute(v, 0);
+          } else {
+            const st = state.stations.find(s => s.id === v.stationId);
+            v.status = 'idle';
+            v.missionId = null;
+            v.route = [];
+            v.routeCum = [];
+            v.segIdx = 0;
+            v.distKm = 0;
+            if (st) { v.lat = st.lat; v.lng = st.lng; }
+          }
+          changed = true;
+        }
+      });
+
+      state.missions.forEach(m => {
+        if (m.status === 'assigned') {
+          const enRoute = state.vehicles.some(v => v.missionId === m.id && v.status !== 'idle');
+          if (!enRoute) { m.status = 'active'; changed = true; }
+        }
+        if (!m.deadline) { m.deadline = Date.now() + MISSION_TIMEOUT_SEC * 1000; changed = true; }
+      });
+
+      if (changed) saveState();
+    }
 
     function initMap() {
       // Default centered on Bucharest / Romania center
@@ -624,7 +831,7 @@
       };
 
       state.stations.push(newStation);
-      
+
       // Auto create 1 default police & 1 smurd vehicle
       state.vehicles.push({
         id: 'v_' + Date.now() + '_1',
@@ -715,6 +922,13 @@
       const station = state.stations.find(s => s.id === activeStationShopId);
       if (!station) return;
 
+      // BUG REPARAT: limita garajului era afisata in UI dar nu era impusa.
+      const currentCount = state.vehicles.filter(v => v.stationId === station.id).length;
+      if (currentCount >= MAX_VEHICLES_PER_STATION) {
+        showToast(`Garaj plin! Maxim ${MAX_VEHICLES_PER_STATION} vehicule per subunitate.`, 'error');
+        return;
+      }
+
       const type = document.getElementById('select-vehicle-type').value;
       let name = 'Autospecială ASAS Pompieri';
       let waterCap = 0;
@@ -763,9 +977,21 @@
        112 EMERGENCY CALL GENERATOR & DISTANCE FILTER
        ========================================================================= */
     function updateMaxDistanceSlider(val) {
-      state.maxDistanceKm = parseInt(val);
-      document.getElementById('slider-distance-val').textContent = `${val} km`;
+      state.maxDistanceKm = Math.max(1, parseInt(val, 10) || 1);
+      document.getElementById('slider-distance-val').textContent = `${state.maxDistanceKm} km`;
+      // BUG REPARAT: cercurile de pe harta nu se actualizau la mutarea sliderului,
+      // asa ca raza parea ca nu functioneaza.
+      refreshCoverageCircles();
       saveState();
+    }
+
+    // Actualizeaza raza cercurilor de acoperire fara sa re-randeze toata harta.
+    function refreshCoverageCircles() {
+      if (!state.showCoverageCircles) return;
+      state.stations.forEach(station => {
+        const circle = mapMarkers.circles[station.id];
+        if (circle) circle.setRadius(state.maxDistanceKm * 1000);
+      });
     }
 
     function startCallGeneratorTimer() {
@@ -780,19 +1006,27 @@
     function generateRandom112Call() {
       if (state.stations.length === 0) return;
 
-      // Pick random station as epicenter
-      const station = state.stations[Math.floor(Math.random() * state.stations.length)];
+      // Generam in jurul unei subunitati, apoi VALIDAM fata de cea mai apropiata
+      // subunitate - altfel, cu mai multe subunitati, cercul afisat nu corespunde
+      // cu locul unde apar de fapt apelurile.
+      let pick = null;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const epicenter = state.stations[Math.floor(Math.random() * state.stations.length)];
+        const candidate = randomPointInRadius(epicenter.lat, epicenter.lng, state.maxDistanceKm);
+        const info = nearestStationInfo(candidate[0], candidate[1]);
+        if (info.km <= state.maxDistanceKm) {
+          pick = { lat: candidate[0], lng: candidate[1], info: info };
+          break;
+        }
+        if (!pick || info.km < pick.info.km) {
+          pick = { lat: candidate[0], lng: candidate[1], info: info };
+        }
+      }
+      if (!pick) return;
 
-      // Generate random lat/lng within maxDistanceKm radius
-      const radiusKm = (Math.random() * 0.85 + 0.15) * state.maxDistanceKm; // min 15% of max
-      const angle = Math.random() * Math.PI * 2;
-
-      // 1 deg lat ~ 111km
-      const dLat = (radiusKm * Math.cos(angle)) / 111;
-      const dLng = (radiusKm * Math.sin(angle)) / (111 * Math.cos(station.lat * Math.PI / 180));
-
-      const callLat = station.lat + dLat;
-      const callLng = station.lng + dLng;
+      const callLat = pick.lat;
+      const callLng = pick.lng;
+      const nearest = pick.info;
 
       const callTemplates = [
         { type: 'fire', reqType: 'fire_custom', title: 'Incendiu Anexă Gospodărească', reward: 8500 },
@@ -807,19 +1041,23 @@
       const template = callTemplates[Math.floor(Math.random() * callTemplates.length)];
 
       const mission = {
-        id: 'm_' + Date.now(),
+        id: 'm_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
         title: template.title,
         type: template.type,
         reqType: template.reqType,
         lat: callLat,
         lng: callLng,
         reward: template.reward,
+        district: nearest.station ? nearest.station.name : null,
+        distanceKm: +nearest.km.toFixed(2),
+        createdAt: Date.now(),
+        deadline: Date.now() + MISSION_TIMEOUT_SEC * 1000,
         status: 'active'
       };
 
       state.missions.push(mission);
       AudioEngine.playDispatchAlert();
-      showToast(`APEL NOU 112: ${mission.title}`, 'warning');
+      showToast(`APEL NOU 112: ${mission.title} (la ${mission.distanceKm.toFixed(1)} km)`, 'warning');
 
       saveState();
       renderUI();
@@ -862,17 +1100,35 @@
 
       if (!vehicle || !mission) return;
 
+      if (vehicle.status !== 'idle') {
+        showToast('Echipajul nu mai este disponibil!', 'error');
+        renderUI();
+        return;
+      }
+
+      // BUG REPARAT: nu se verifica tipul echipajului, deci puteai trimite
+      // SMURD la incendiu. Acum se compara cu mission.reqType.
+      if (vehicle.type !== mission.reqType) {
+        showToast(`Echipaj incompatibil! Ai nevoie de ${TYPE_LABEL[mission.reqType] || mission.reqType}.`, 'error');
+        renderUI();
+        return;
+      }
+
       vehicle.status = 'dispatched';
       vehicle.missionId = mission.id;
+      vehicle.speedKmh = VEHICLE_SPEEDS[vehicle.type] || 60;
       mission.status = 'assigned';
+      delete dispatchSelections[mission.id];
 
       AudioEngine.playSirenTone();
-      showToast(`Echipajul "${vehicle.name}" trimis la misiune!`, 'info');
+      showToast(`Echipajul "${vehicle.name}" trimis la interventie!`, 'info');
 
-      // Fetch road route
+      // Ruta rutiera reala, apoi metrici de distanta pentru viteza constanta in km/h.
       const routeCoords = await fetchOSRMRoute(vehicle.lat, vehicle.lng, mission.lat, mission.lng);
-      vehicle.route = routeCoords;
-      vehicle.routeIdx = 0;
+      setVehicleRoute(vehicle, routeCoords);
+
+      const eta = Math.round(etaSeconds(vehicle.routeTotalKm, vehicle.speedKmh));
+      showToast(`Traseu ${vehicle.routeTotalKm.toFixed(1)} km - sosire in ~${eta}s`, 'info');
 
       saveState();
       renderUI();
@@ -883,36 +1139,40 @@
        GAME LOOP & REAL-TIME VEHICLE MOVEMENT PHYSICS
        ========================================================================= */
     function startGameLoop() {
+      let lastTick = Date.now();
+      let saveCounter = 0;
+
       setInterval(() => {
+        const now = Date.now();
+        // Limiteaza delta-ul: daca tab-ul a fost in background, nu teleporta echipajele.
+        const dtSec = Math.min((now - lastTick) / 1000, 2);
+        lastTick = now;
+
         let stateChanged = false;
+        checkMissionTimeouts();
 
         state.vehicles.forEach(vehicle => {
-          if ((vehicle.status === 'dispatched' || vehicle.status === 'returning') && vehicle.route.length > 0) {
-            
-            // Speed along route
-            const speedStep = 1; 
-            vehicle.routeIdx += speedStep;
+          if ((vehicle.status === 'dispatched' || vehicle.status === 'returning') &&
+              vehicle.route && vehicle.route.length > 1) {
 
-            if (vehicle.routeIdx < vehicle.route.length) {
-              const currPoint = vehicle.route[vehicle.routeIdx];
-              vehicle.lat = currPoint[0];
-              vehicle.lng = currPoint[1];
-              stateChanged = true;
-            } else {
-              // Reached endpoint
+            // BUG REPARAT: inainte se avansa 1 punct la 300ms, deci durata depindea
+            // de cate puncte avea ruta OSRM, nu de distanta. Acum e viteza reala (km/h).
+            const atEnd = advanceVehicleAlongRoute(vehicle, dtSec);
+            stateChanged = true;
+
+            if (atEnd) {
               if (vehicle.status === 'dispatched') {
                 vehicle.status = 'on_scene';
-                vehicle.lat = vehicle.route[vehicle.route.length - 1][0];
-                vehicle.lng = vehicle.route[vehicle.route.length - 1][1];
-                
-                // Simulate on scene work timer
                 setTimeout(() => completeMissionWork(vehicle.id), 8000);
               } else if (vehicle.status === 'returning') {
                 vehicle.status = 'idle';
                 vehicle.route = [];
+                vehicle.routeCum = [];
                 vehicle.routeIdx = 0;
+                vehicle.segIdx = 0;
+                vehicle.distKm = 0;
                 vehicle.missionId = null;
-                
+
                 // Snap to station
                 const st = state.stations.find(s => s.id === vehicle.stationId);
                 if (st) {
@@ -920,25 +1180,28 @@
                   vehicle.lng = st.lng;
                 }
               }
-              stateChanged = true;
             }
           }
         });
 
         if (stateChanged) {
           updateVehiclePositionsOnMap();
+          saveCounter++;
+          if (saveCounter >= 16) { saveCounter = 0; saveState(); } // salvare ~5s
         }
       }, 300);
     }
 
     async function completeMissionWork(vehicleId) {
       const vehicle = state.vehicles.find(v => v.id === vehicleId);
-      if (!vehicle) return;
+      // Guard: previne dubla recompensa daca timerul de interventie ruleaza de doua ori
+      // (unul din memorie + unul restaurat dupa reload).
+      if (!vehicle || vehicle.status !== 'on_scene') return;
 
       const missionIndex = state.missions.findIndex(m => m.id === vehicle.missionId);
       if (missionIndex !== -1) {
         const mission = state.missions[missionIndex];
-        
+
         // Award reward
         state.budget += mission.reward;
         AudioEngine.playSuccessChime();
@@ -952,11 +1215,14 @@
       const station = state.stations.find(s => s.id === vehicle.stationId);
       if (station) {
         vehicle.status = 'returning';
+        vehicle.speedKmh = VEHICLE_SPEEDS[vehicle.type] || 60;
         const returnRoute = await fetchOSRMRoute(vehicle.lat, vehicle.lng, station.lat, station.lng);
-        vehicle.route = returnRoute;
-        vehicle.routeIdx = 0;
+        setVehicleRoute(vehicle, returnRoute);
       } else {
         vehicle.status = 'idle';
+        vehicle.missionId = null;
+        vehicle.route = [];
+        vehicle.routeCum = [];
       }
 
       saveState();
@@ -1060,7 +1326,9 @@
 
         // Draw neon route line if active
         if (vehicle.route.length > 0 && (vehicle.status === 'dispatched' || vehicle.status === 'returning')) {
-          const polyline = L.polyline(vehicle.route, {
+          // Deseneaza doar portiunea ramasa de parcurs.
+          const remaining = vehicle.route.slice(vehicle.segIdx || 0);
+          const polyline = L.polyline(remaining, {
             color: '#00f3ff',
             weight: 4,
             opacity: 0.8,
@@ -1104,6 +1372,7 @@
 
       renderMissionsList();
       renderStationsList();
+      updateMissionTimers();
     }
 
     function renderMissionsList() {
@@ -1124,8 +1393,8 @@
         if (mission.type === 'police') badgeColor = 'bg-blue-950/80 text-blue-400 border-blue-800';
         if (mission.type === 'smurd') badgeColor = 'bg-emerald-950/80 text-emerald-400 border-emerald-800';
 
-        // Find available vehicles
-        const availVehicles = state.vehicles.filter(v => v.status === 'idle');
+        // Doar echipaje libere SI de tipul cerut de misiune.
+        const availVehicles = state.vehicles.filter(v => v.status === 'idle' && v.type === mission.reqType);
 
         let dispatchControlsHtml = '';
         if (mission.status === 'assigned') {
@@ -1136,15 +1405,16 @@
         } else if (availVehicles.length === 0) {
           dispatchControlsHtml = `
             <div class="text-[11px] text-red-400 pt-2 border-t border-slate-800">
-              Niciun echipaj disponibil în garaje!
+              Niciun echipaj de tip <b>${TYPE_LABEL[mission.reqType] || mission.reqType}</b> disponibil!
             </div>`;
         } else {
+          const selected = dispatchSelections[mission.id];
           dispatchControlsHtml = `
             <div class="pt-2 border-t border-slate-800 space-y-2">
               <label class="text-[10px] text-slate-400 uppercase font-semibold">Trimite Echipaj Disponibil:</label>
               <div class="flex gap-2">
-                <select id="select-dispatch-${mission.id}" class="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-200">
-                  ${availVehicles.map(v => `<option value="${v.id}">${v.name}</option>`).join('')}
+                <select id="select-dispatch-${mission.id}" onchange="rememberDispatchSelection('${mission.id}', this.value)" class="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-200">
+                  ${availVehicles.map(v => `<option value="${v.id}" ${v.id === selected ? 'selected' : ''}>${v.name}</option>`).join('')}
                 </select>
                 <button onclick="dispatchVehicleToMission(document.getElementById('select-dispatch-${mission.id}').value, '${mission.id}')" class="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs rounded-lg shadow-md">
                   Trimite
@@ -1153,16 +1423,24 @@
             </div>`;
         }
 
+        const distLabel = (mission.distanceKm != null) ? `${mission.distanceKm.toFixed(1)} km` : '?';
         const card = document.createElement('div');
         card.className = 'glass-panel p-3 rounded-xl space-y-2 border border-slate-800 hover:border-slate-700 transition';
         card.innerHTML = `
           <div class="flex justify-between items-start">
             <span class="text-xs px-2 py-0.5 rounded border ${badgeColor} font-bold uppercase tracking-wider">
-              ${mission.type.toUpperCase()}
+              ${TYPE_LABEL[mission.reqType] || mission.type.toUpperCase()}
             </span>
             <span class="font-orbitron text-xs font-bold text-emerald-400">+${mission.reward.toLocaleString('ro-RO')} LEI</span>
           </div>
           <h4 class="text-sm font-bold text-slate-100">${mission.title}</h4>
+          <div class="flex justify-between items-center text-[11px] text-slate-400">
+            <span><i class="fa-solid fa-location-dot mr-1"></i>${distLabel} · ${mission.district || 'necunoscut'}</span>
+            <span id="timer-${mission.id}">--:--</span>
+          </div>
+          <button onclick="focusMissionOnMap('${mission.id}')" class="w-full py-1 rounded-lg bg-slate-800/60 hover:bg-slate-800 text-slate-300 text-[11px] font-semibold transition">
+            <i class="fa-solid fa-crosshairs mr-1"></i> Vezi pe hartă
+          </button>
           ${dispatchControlsHtml}
         `;
         container.appendChild(card);
@@ -1193,11 +1471,15 @@
               <h4 class="text-sm font-bold text-cyan-400 flex items-center gap-2">
                 <i class="fa-solid fa-warehouse"></i> ${station.name}
               </h4>
-              <p class="text-[10px] text-slate-400">Garaj: ${stationVehicles.length} / 10 Vehicule</p>
+              <p class="text-[10px] text-slate-400">Garaj: ${stationVehicles.length} / ${MAX_VEHICLES_PER_STATION} Vehicule</p>
             </div>
+            ${stationVehicles.length >= MAX_VEHICLES_PER_STATION ? `
+            <span class="px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-500 font-semibold text-xs flex items-center gap-1">
+              <i class="fa-solid fa-ban"></i> Garaj Plin
+            </span>` : `
             <button onclick="openVehicleShopModal('${station.id}')" class="px-2.5 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-400 font-semibold text-xs flex items-center gap-1">
               <i class="fa-solid fa-plus"></i> Cumpără Vehicul
-            </button>
+            </button>`}
           </div>
 
           <div class="space-y-1.5">
@@ -1219,6 +1501,67 @@
         `;
         container.appendChild(card);
       });
+    }
+
+    /* =========================================================================
+       MISSION TIMERS, DISPATCH SELECTION & MAP FOCUS
+       ========================================================================= */
+    const TYPE_LABEL = { fire_custom: 'Pompieri', police: 'Poliție', smurd: 'SMURD' };
+
+    function rememberDispatchSelection(missionId, vehicleId) {
+      dispatchSelections[missionId] = vehicleId;
+    }
+
+    function focusMissionOnMap(missionId) {
+      const m = state.missions.find(x => x.id === missionId);
+      if (m) map.flyTo([m.lat, m.lng], 14);
+    }
+
+    // Actualizeaza doar textele de countdown, fara sa re-randeze lista.
+    function updateMissionTimers() {
+      const now = Date.now();
+      state.missions.forEach(m => {
+        const el = document.getElementById('timer-' + m.id);
+        if (!el) return;
+        if (m.status !== 'active' || !m.deadline) {
+          el.textContent = 'în intervenție';
+          el.className = 'font-orbitron text-[11px] font-bold text-amber-400';
+          return;
+        }
+        const left = Math.max(0, Math.round((m.deadline - now) / 1000));
+        const mm = String(Math.floor(left / 60)).padStart(2, '0');
+        const ss = String(left % 60).padStart(2, '0');
+        el.textContent = `${mm}:${ss}`;
+        el.className = left <= 30
+          ? 'font-orbitron text-[11px] font-bold text-red-400 animate-pulse'
+          : 'font-orbitron text-[11px] font-bold text-slate-400';
+      });
+    }
+
+    function startTimersLoop() {
+      setInterval(updateMissionTimers, 1000);
+    }
+
+    // BUG REPARAT: apelurile ignorate se acumulau pana la 8 si blocau generatorul
+    // pentru totdeauna. Acum expira si se aplica o penalizare.
+    function checkMissionTimeouts() {
+      const now = Date.now();
+      const expired = state.missions.filter(m => m.status === 'active' && m.deadline && now > m.deadline);
+      if (expired.length === 0) return;
+
+      expired.forEach(m => {
+        const idx = state.missions.findIndex(x => x.id === m.id);
+        if (idx !== -1) state.missions.splice(idx, 1);
+        delete dispatchSelections[m.id];
+        const penalty = Math.round(m.reward * MISSION_FAIL_PENALTY);
+        state.budget = Math.max(0, state.budget - penalty);
+        showToast(`Apel 112 expirat: ${m.title}. Penalizare -${penalty.toLocaleString('ro-RO')} LEI`, 'error');
+      });
+
+      AudioEngine.playTimeoutTone();
+      saveState();
+      renderUI();
+      renderMapElements();
     }
 
     /* =========================================================================
