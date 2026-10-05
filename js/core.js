@@ -219,6 +219,19 @@ function cornerLimitFromAngle(deg) {
 // Sub aceasta valoare limita de drum nu conteaza: se foloseste 50 (cerut explicit).
 const ROAD_MIN_KMH = 50;
 
+// Anticipare: viteza tinta se uita si la limita de drum din urmatorii ~400 m, ca
+// masina sa accelereze INAINTE de sectorul rapid (ex. iesirea din oras pe județean),
+// nu dupa ce a intrat pe el. Se anticipeaza doar salturile mari (>= 15 km/h),
+// ca sa nu reactioneze la diferentele mici din oras (50 -> 60 -> 50).
+const ROAD_AHEAD_KM = 0.4;
+const ROAD_AHEAD_MIN_DELTA = 15;
+
+// Sector lung si drept (drum judetean/national): mai pune peste depasirea de urgenta.
+// Datele OSM din Romania dau des 50 km/h si pe DN/DJ, deci geometria ramane semnalul
+// principal: daca drumul e drept pe sute de metri, masina trebuie sa poata merge tare.
+const STRAIGHT_EXTRA_KMH = 10;
+const STRAIGHT_EXTRA_MIN_LIMIT = 50;
+
 // Limita de drum estimata din densitatea nodurilor (folosita DOAR cand nu avem
 // vitezele reale de pe ruta): strazile urbane au intersectii dese (noduri la
 // 20-100 m), drumurile judetene/nationale au noduri rare.
@@ -288,7 +301,7 @@ function buildSegmentProfile(route, flowKmh) {
     let sumA = 0, cntA = 0, dist = 0;
     for (let k = j + 1; k <= n - 2 && dist < 0.7; k++) { sumA += angle[k]; cntA++; dist += segKm[k]; }
     const avgAngle = cntA ? sumA / cntA : 0;
-    straight[j] = avgAngle < 3 ? 1.20 : avgAngle < 7 ? 1.14 : avgAngle < 14 ? 1.07 : 1.00;
+    straight[j] = avgAngle < 1.5 ? 1.32 : avgAngle < 3 ? 1.22 : avgAngle < 7 ? 1.12 : avgAngle < 14 ? 1.05 : 1.00;
   }
 
   return { speeds: speeds, corner: corner, straight: straight };
@@ -344,55 +357,76 @@ function buildRouteMetrics(route) {
   return { cum: cum, totalKm: cum.length ? cum[cum.length - 1] : 0 };
 }
 
-// Viteza tinta (km/h) in punctul curent: limita drumului x regim de urgenta,
-// plafonata de vehicul, cu franare anticipata pentru virajele din fata si
-// incetinire lina la apropierea de destinatie.
+// Viteza tinta (km/h) se calculeaza din mai multe variabile:
+//   1. limita reala de drum (OSM) pe segmentul curent SI pe urmatorii ~400 m - anticipare;
+//   2. depasirea de urgenta proprie tipului de echipaj;
+//   3. stilul soferului (variaza pe parcurs) x cat de drept e sectorul;
+//   4. bonus pe sectoare lungi si drepte (drum bun == merge mai tare);
+//   5. plafonul fizic de viraj + franarea anticipata pentru ce urmeaza mai lent.
+
+function straightAt(vehicle, idx) {
+  return (vehicle.routeStraight && vehicle.routeStraight[idx] != null) ? vehicle.routeStraight[idx] : 1;
+}
 
 function vehicleTargetSpeedKmh(vehicle, distKm, segIdx) {
   const p = vehicleProfile(vehicle);
   const speeds = vehicle.routeSpeeds;
+  if (!speeds || !speeds.length) return p.maxKmh;
 
-  let target = p.maxKmh;
-  if (speeds && speeds.length) {
-    const i = Math.min(Math.max(segIdx | 0, 0), speeds.length - 1);
-    const here = speeds[i] == null ? ROAD_MIN_KMH : speeds[i];
-    // Viteza tinta = limita reala a drumului + depasire de urgenta, modulata de
-    // stilul soferului si de cat de drept e sectorul. Nu e o limita fixa.
-    const dyn = driverSpeedFactor(vehicle, distKm) *
-                (vehicle.routeStraight && vehicle.routeStraight[i] != null ? vehicle.routeStraight[i] : 1);
-    const overtake = OVERTAKE_KMH[vehicle.type] || 25;
+  const i = Math.min(Math.max(segIdx | 0, 0), speeds.length - 1);
+  const cum = vehicle.routeCum;
+  const overtake = OVERTAKE_KMH[vehicle.type] || 25;
+  const straightHere = straightAt(vehicle, i);
+  const dyn = driverSpeedFactor(vehicle, distKm) * straightHere;
 
-    // Tinta pe un segment oarecare, cu acelasi model (folosita si la franarea anticipata).
-    const segTarget = (idx) => {
-      let t = Math.min(p.maxKmh, (speeds[idx] == null ? ROAD_MIN_KMH : speeds[idx]) + overtake * dyn);
-      const cor = vehicle.routeCorner && vehicle.routeCorner[idx];
-      if (cor != null && cor < t) t = cor;
-      return t;
-    };
-
-    target = segTarget(i);
-
-    const cum = vehicle.routeCum;
-    if (cum) {
-      const aSpatial = spatialAccelMs2(p.brake);
-      const lookaheadKm = cornerLookaheadKm();
-      for (let j = i + 1; j < speeds.length; j++) {
-        const dKm = cum[j] - distKm;
-        if (dKm > lookaheadKm) break;
-        // viteza maxima pe care o pot avea ACUM ca sa pot frana la timp la tinta de acolo
-        const vNextMs = segTarget(j) / 3.6;
-        const allowed = Math.sqrt(vNextMs * vNextMs + 2 * aSpatial * Math.max(0, dKm * 1000)) * 3.6;
-        if (allowed < target) target = allowed;
-      }
-      const total = cum[cum.length - 1];
-      const leftKm = total - distKm;
-      if (leftKm < ARRIVAL_SLOWDOWN_KM) {
-        // viteza maxima cu care pot ajunge la destinatie si opri exact acolo
-        const vArr = Math.sqrt(Math.max(0, 2 * aSpatial * leftKm * 1000)) * 3.6;
-        target = Math.min(target, vArr);
-      }
+  // (1) limita de drum, cu anticiparea sectorului urmator
+  const here = speeds[i] == null ? ROAD_MIN_KMH : speeds[i];
+  let roadLimit = here;
+  if (cum) {
+    for (let j = i + 1; j < speeds.length; j++) {
+      const dKm = cum[j] - distKm;
+      if (dKm > ROAD_AHEAD_KM) break;
+      // doar salturile mari conteaza (oras -> județean); 50 -> 60 in oras e zgomot
+      if (speeds[j] == null || speeds[j] < here + ROAD_AHEAD_MIN_DELTA) continue;
+      // trecere graduala: cu cat sectorul rapid e mai aproape, cu atat conteaza mai mult
+      const closeness = 1 - dKm / ROAD_AHEAD_KM;
+      const blended = here + (speeds[j] - here) * closeness;
+      if (blended > roadLimit) roadLimit = blended;
     }
   }
+
+  let target = Math.min(p.maxKmh, roadLimit + overtake * dyn);
+
+  // (4) sector lung si drept: calcă pedala
+  if (straightHere >= 1.22 && roadLimit >= STRAIGHT_EXTRA_MIN_LIMIT) {
+    target = Math.min(p.maxKmh, target + STRAIGHT_EXTRA_KMH);
+  }
+
+  // (5a) plafonul fizic de viraj (nu se depaseste)
+  const corner = vehicle.routeCorner && vehicle.routeCorner[i];
+  if (corner != null && corner < target) target = corner;
+
+  // (5b) franarea anticipata + oprirea la destinatie
+  if (cum) {
+    const aSpatial = spatialAccelMs2(p.brake);
+    const lookaheadKm = cornerLookaheadKm();
+    for (let j = i + 1; j < speeds.length; j++) {
+      const dKm = cum[j] - distKm;
+      if (dKm > lookaheadKm) break;
+      const cor = vehicle.routeCorner && vehicle.routeCorner[j];
+      let vNext = Math.min(p.maxKmh, (speeds[j] == null ? ROAD_MIN_KMH : speeds[j]) + overtake * dyn);
+      if (cor != null && cor < vNext) vNext = cor;
+      const vNextMs = vNext / 3.6;
+      const allowed = Math.sqrt(vNextMs * vNextMs + 2 * aSpatial * Math.max(0, dKm * 1000)) * 3.6;
+      if (allowed < target) target = allowed;
+    }
+    const leftKm = cum[cum.length - 1] - distKm;
+    if (leftKm < ARRIVAL_SLOWDOWN_KM) {
+      const vArr = Math.sqrt(Math.max(0, 2 * aSpatial * leftKm * 1000)) * 3.6;
+      target = Math.min(target, vArr);
+    }
+  }
+
   return Math.max(0, target);
 }
 
