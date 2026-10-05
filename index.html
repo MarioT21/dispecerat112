@@ -1,0 +1,1302 @@
+<!DOCTYPE html>
+<html lang="ro" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Dispecerat Național 112 - Simulator România</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            tactical: {
+              bg: '#0b0f19',
+              card: '#111827',
+              border: '#1f2937',
+              accent: '#00f3ff',
+              danger: '#ef4444',
+              warning: '#f59e0b',
+              police: '#3b82f6',
+              fire: '#f97316',
+              medical: '#10b981'
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Leaflet CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- FontAwesome Icons & Google Fonts -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;900&family=Orbitron:wght@500;700;900&display=swap" rel="stylesheet">
+
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #0b0f19;
+      color: #e2e8f0;
+      overflow: hidden;
+    }
+    .font-orbitron {
+      font-family: 'Orbitron', sans-serif;
+    }
+    /* Custom Scrollbars */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #00f3ff; }
+
+    /* Glassmorphic UI Elements */
+    .glass-panel {
+      background: rgba(15, 23, 42, 0.88);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .glass-modal {
+      background: rgba(11, 15, 25, 0.96);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(0, 243, 255, 0.25);
+    }
+
+    /* Pulse animations */
+    @keyframes pulse-red {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+      50% { box-shadow: 0 0 0 14px rgba(239, 68, 68, 0); }
+    }
+    .pulse-emergency {
+      animation: pulse-red 1.8s infinite;
+    }
+
+    @keyframes pulse-cyan {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(0, 243, 255, 0.6); }
+      50% { box-shadow: 0 0 0 10px rgba(0, 243, 255, 0); }
+    }
+    .pulse-cyan {
+      animation: pulse-cyan 2s infinite;
+    }
+
+    /* Range slider custom style */
+    input[type=range] {
+      accent-color: #00f3ff;
+    }
+
+    /* Leaflet marker & route glowing overrides */
+    .leaflet-interactive.route-glow {
+      filter: drop-shadow(0px 0px 8px #00f3ff);
+    }
+    .custom-leaflet-icon {
+      background: transparent;
+      border: none;
+    }
+  </style>
+</head>
+<body class="h-screen w-screen flex flex-col justify-between overflow-hidden select-none">
+
+  <!-- Top Navigation / Tactical Status Bar -->
+  <header class="h-16 bg-slate-900/90 border-b border-slate-800 px-4 flex items-center justify-between z-30 shadow-2xl relative">
+    <div class="flex items-center space-x-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-red-600 via-blue-600 to-amber-500 p-[2px] flex items-center justify-center shadow-lg shadow-cyan-500/10">
+        <div class="w-full h-full bg-slate-950 rounded-[10px] flex items-center justify-center">
+          <i class="fa-solid font-bold text-red-500 text-xl fa-shield-halved animate-pulse"></i>
+        </div>
+      </div>
+      <div>
+        <h1 class="font-orbitron font-bold text-lg tracking-wider text-slate-100 flex items-center gap-2">
+          DISPECERAT 112 <span class="text-xs px-2 py-0.5 rounded bg-red-950/80 text-red-400 border border-red-800/50">RO</span>
+        </h1>
+        <p class="text-[10px] text-slate-400 tracking-tight flex items-center gap-1.5">
+          <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
+          SISTEM NAȚIONAL UNIC PENTRU APELURI DE URGENȚĂ
+        </p>
+      </div>
+    </div>
+
+    <!-- Economie & Stats Top Display -->
+    <div class="hidden md:flex items-center space-x-6">
+      <div class="bg-slate-950/80 px-4 py-1.5 rounded-lg border border-slate-800 flex items-center gap-3">
+        <i class="fa-solid fa-wallet text-amber-400 text-lg"></i>
+        <div>
+          <div class="text-[10px] text-slate-400 uppercase font-semibold">Buget Dispecerat</div>
+          <div id="display-budget" class="font-orbitron font-bold text-emerald-400 text-base">250.000 LEI</div>
+        </div>
+      </div>
+
+      <div class="bg-slate-950/80 px-4 py-1.5 rounded-lg border border-slate-800 flex items-center gap-3">
+        <i class="fa-solid fa-building-shield text-cyan-400 text-lg"></i>
+        <div>
+          <div class="text-[10px] text-slate-400 uppercase font-semibold">Subunități Aktiv</div>
+          <div id="display-stations-count" class="font-orbitron font-bold text-slate-100 text-base">0</div>
+        </div>
+      </div>
+
+      <div class="bg-slate-950/80 px-4 py-1.5 rounded-lg border border-slate-800 flex items-center gap-3">
+        <i class="fa-solid fa-[#ef4444] fa-phone-volume text-red-500 text-lg animate-bounce"></i>
+        <div>
+          <div class="text-[10px] text-slate-400 uppercase font-semibold">Apeluri Active</div>
+          <div id="display-missions-count" class="font-orbitron font-bold text-red-400 text-base">0</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Controls -->
+    <div class="flex items-center space-x-2">
+      <button id="btn-audio-toggle" onclick="toggleAudio()" class="p-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition" title="Sunet On/Off">
+        <i id="audio-icon" class="fa-solid fa-volume-high text-cyan-400"></i>
+      </button>
+
+      <button onclick="toggleMobileMenu()" class="md:hidden p-2.5 rounded-lg bg-slate-800 text-slate-300">
+        <i class="fa-solid fa-bars text-lg"></i>
+      </button>
+
+      <button onclick="resetDataPrompt()" class="hidden md:flex p-2.5 rounded-lg bg-red-950/40 hover:bg-red-900/60 border border-red-800/40 text-red-400 text-xs font-semibold items-center gap-1.5">
+        <i class="fa-solid fa-rotate-right"></i> Reset
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Workspace -->
+  <div class="flex-1 relative flex overflow-hidden">
+    
+    <!-- Sidebar Panel (Misiuni, Subunitati, Configurare) -->
+    <aside id="sidebar" class="absolute md:relative z-20 left-0 top-0 h-full w-full sm:w-96 bg-slate-900/95 border-r border-slate-800 flex flex-col transition-transform duration-300 -translate-x-full md:translate-x-0">
+      
+      <!-- Tab Header -->
+      <div class="flex border-b border-slate-800 bg-slate-950/60 p-1">
+        <button onclick="switchTab('missions')" id="tab-btn-missions" class="flex-1 py-2.5 text-xs font-semibold rounded-lg bg-slate-800 text-cyan-400 flex items-center justify-center gap-2 transition">
+          <i class="fa-solid fa-triangle-exclamation"></i> Misiuni 112
+          <span id="badge-missions-tab" class="px-1.5 py-0.2 bg-red-600 text-white text-[10px] rounded-full">0</span>
+        </button>
+        <button onclick="switchTab('stations')" id="tab-btn-stations" class="flex-1 py-2.5 text-xs font-semibold rounded-lg text-slate-400 hover:text-slate-200 flex items-center justify-center gap-2 transition">
+          <i class="fa-solid fa-warehouse"></i> Subunități
+          <span id="badge-stations-tab" class="px-1.5 py-0.2 bg-slate-700 text-slate-200 text-[10px] rounded-full">0</span>
+        </button>
+        <button onclick="switchTab('settings')" id="tab-btn-settings" class="flex-1 py-2.5 text-xs font-semibold rounded-lg text-slate-400 hover:text-slate-200 flex items-center justify-center gap-2 transition">
+          <i class="fa-solid fa-sliders"></i> Setări
+        </button>
+      </div>
+
+      <!-- Tab Content 1: Apeluri 112 Misiuni -->
+      <div id="tab-content-missions" class="flex-1 overflow-y-auto p-3 space-y-3">
+        <div class="flex items-center justify-between pb-2 border-b border-slate-800/80">
+          <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Misiuni în Desfășurare</span>
+          <span class="text-[11px] text-cyan-400">Actualizare Live</span>
+        </div>
+        <div id="missions-list" class="space-y-3">
+          <!-- Dynamic cards populated here -->
+        </div>
+      </div>
+
+      <!-- Tab Content 2: Subunități & Garaje -->
+      <div id="tab-content-stations" class="hidden flex-1 overflow-y-auto p-3 space-y-3">
+        <!-- Button Construct Station -->
+        <button onclick="startStationPlacementMode()" class="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold text-sm shadow-lg shadow-cyan-500/20 flex items-center justify-center gap-2 border border-cyan-400/30 transition">
+          <i class="fa-solid fa-plus-circle text-lg"></i>
+          Plasare Subunitate Nouă (100.000 LEI)
+        </button>
+
+        <div class="flex items-center justify-between pt-2 pb-1 border-b border-slate-800">
+          <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Garajele Subunităților</span>
+        </div>
+
+        <div id="stations-list" class="space-y-3">
+          <!-- Dynamic station cards -->
+        </div>
+      </div>
+
+      <!-- Tab Content 3: Setari & Filtru Distanta Slider -->
+      <div id="tab-content-settings" class="hidden flex-1 overflow-y-auto p-4 space-y-6">
+        
+        <!-- Slider Distanta Misiuni Maxima (1 - 150 km) -->
+        <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-800 space-y-3">
+          <div class="flex justify-between items-center">
+            <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+              <i class="fa-solid fa-compass text-cyan-400"></i> Rază Max. Generare Apeluri
+            </label>
+            <span id="slider-distance-val" class="font-orbitron text-sm font-bold text-cyan-400">25 km</span>
+          </div>
+          <p class="text-[11px] text-slate-400 leading-relaxed">
+            Alege distanța maximă (1 - 150 km) față de cea mai apropiată subunitate la care pot apărea urgente 112.
+          </p>
+          <input type="range" id="input-max-distance" min="1" max="150" value="25" oninput="updateMaxDistanceSlider(this.value)" class="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer">
+          <div class="flex justify-between text-[10px] text-slate-500 font-mono">
+            <span>1 km</span>
+            <span>75 km</span>
+            <span>150 km</span>
+          </div>
+        </div>
+
+        <!-- Layer Selector Hartă -->
+        <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-800 space-y-3">
+          <label class="text-xs font-bold text-slate-200 uppercase tracking-wider block">
+            <i class="fa-solid fa-layer-group text-cyan-400 mr-1"></i> Stil Hartă Dispecerat
+          </label>
+          <div class="grid grid-cols-1 gap-2">
+            <button onclick="changeMapTile('dark')" class="py-2 px-3 rounded-lg bg-slate-800 border border-cyan-500/50 text-cyan-400 text-xs text-left font-semibold flex items-center justify-between">
+              <span><i class="fa-solid fa-moon mr-2"></i> Dark Tactical (CartoDB)</span>
+              <i class="fa-solid fa-check"></i>
+            </button>
+            <button onclick="changeMapTile('osm')" class="py-2 px-3 rounded-lg bg-slate-800/60 hover:bg-slate-800 text-slate-300 text-xs text-left font-semibold flex items-center justify-between">
+              <span><i class="fa-solid fa-map mr-2"></i> OpenStreetMap Standard</span>
+            </button>
+            <button onclick="changeMapTile('satellite')" class="py-2 px-3 rounded-lg bg-slate-800/60 hover:bg-slate-800 text-slate-300 text-xs text-left font-semibold flex items-center justify-between">
+              <span><i class="fa-solid fa-globe mr-2"></i> Satelit Esri Hibrid</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Vizibilitate Cerc Rază -->
+        <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-800 flex items-center justify-between">
+          <div>
+            <div class="text-xs font-bold text-slate-200">Afișează Cerc Acoperire Subunități</div>
+            <div class="text-[10px] text-slate-400">Desenează cercurile pe hartă</div>
+          </div>
+          <input type="checkbox" id="toggle-coverage-circle" checked onchange="toggleCoverageCircles(this.checked)" class="w-5 h-5 rounded bg-slate-800 border-slate-700 text-cyan-500 focus:ring-0 cursor-pointer">
+        </div>
+
+      </div>
+    </aside>
+
+    <!-- Map Container Area -->
+    <main class="flex-1 relative bg-slate-950">
+      
+      <!-- Leaflet Map Canvas -->
+      <div id="map" class="w-full h-full z-10"></div>
+
+      <!-- Placement Active Banner Notification -->
+      <div id="placement-banner" class="hidden absolute top-4 left-1/2 -translate-x-1/2 z-20 bg-amber-500 text-slate-950 px-6 py-3 rounded-full font-bold text-sm shadow-2xl flex items-center gap-3 animate-bounce border-2 border-white">
+        <i class="fa-solid fa-crosshairs text-lg"></i>
+        <span>CLICK PE HARTĂ PENTRU A PLASA SUBUNITATEA (100.000 LEI)</span>
+        <button onclick="cancelStationPlacementMode()" class="ml-2 bg-slate-950 text-white px-2.5 py-1 rounded-full text-xs hover:bg-slate-800">
+          Anulează
+        </button>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- Modal 1: Naming & Confirming Station Placement -->
+  <div id="modal-station-name" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
+    <div class="glass-modal w-full max-w-md rounded-2xl p-6 space-y-4 shadow-2xl">
+      <div class="flex justify-between items-center border-b border-slate-800 pb-3">
+        <h3 class="font-orbitron font-bold text-lg text-cyan-400 flex items-center gap-2">
+          <i class="fa-solid fa-building-shield"></i> Construcție Subunitate 112
+        </h3>
+        <button onclick="closeModal('modal-station-name')" class="text-slate-400 hover:text-white">
+          <i class="fa-solid fa-xmark text-lg"></i>
+        </button>
+      </div>
+      <p class="text-xs text-slate-300">
+        Introdu denumirea oficială pentru noua subunitate construită pe coordonatele selectate.
+      </p>
+      <div>
+        <label class="block text-xs font-semibold text-slate-400 mb-1">Nume Subunitate</label>
+        <input type="text" id="input-station-name" value="Detașamentul 1 Pompieri" class="w-full px-4 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 text-sm focus:outline-none focus:border-cyan-400">
+      </div>
+      <div class="bg-slate-900/80 p-3 rounded-xl border border-slate-800 flex justify-between items-center text-xs">
+        <span class="text-slate-400">Cost Construcție:</span>
+        <span class="font-orbitron font-bold text-amber-400">100.000 LEI</span>
+      </div>
+      <div class="flex gap-3 pt-2">
+        <button onclick="closeModal('modal-station-name')" class="flex-1 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-semibold text-xs hover:bg-slate-700">
+          Renunță
+        </button>
+        <button onclick="confirmStationPurchase()" class="flex-1 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs shadow-lg shadow-cyan-500/20">
+          Cumpără & Plasează
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal 2: Dynamic Fire Truck & Vehicle Configurator -->
+  <div id="modal-vehicle-shop" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
+    <div class="glass-modal w-full max-w-lg rounded-2xl p-6 space-y-5 shadow-2xl max-h-[90vh] overflow-y-auto">
+      <div class="flex justify-between items-center border-b border-slate-800 pb-3">
+        <h3 class="font-orbitron font-bold text-lg text-cyan-400 flex items-center gap-2">
+          <i class="fa-solid fa-truck-monster"></i> Configurator Achiziție Vehicul
+        </h3>
+        <button onclick="closeModal('modal-vehicle-shop')" class="text-slate-400 hover:text-white">
+          <i class="fa-solid fa-xmark text-lg"></i>
+        </button>
+      </div>
+
+      <!-- Select Type -->
+      <div class="space-y-2">
+        <label class="block text-xs font-semibold text-slate-300">Alege Tipul de Vehicul</label>
+        <select id="select-vehicle-type" onchange="handleVehicleTypeChange(this.value)" class="w-full px-4 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 text-sm focus:outline-none focus:border-cyan-400">
+          <option value="fire_custom">Autospecială Pompieri ASAS (Configurabilă)</option>
+          <option value="police">Echipaj Poliție (Dacia Duster) - 35.000 LEI</option>
+          <option value="smurd">Ambulanță SMURD Tip B2 - 55.000 LEI</option>
+        </select>
+      </div>
+
+      <!-- Custom Fire Truck Controls Section -->
+      <div id="fire-truck-customizer" class="space-y-4 bg-slate-950/80 p-4 rounded-xl border border-slate-800">
+        <div class="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-2">
+          <i class="fa-solid fa-sliders"></i> Opțiuni Specifice Pompieri
+        </div>
+
+        <!-- Water Slider -->
+        <div class="space-y-2">
+          <div class="flex justify-between items-center text-xs">
+            <span class="text-slate-300 font-medium">Capacitate Rezervor Apă:</span>
+            <span id="display-water-val" class="font-orbitron text-cyan-400 font-bold">5.000 Litri</span>
+          </div>
+          <input type="range" id="input-water-capacity" min="300" max="20000" step="100" value="5000" oninput="updateFireTruckPrice()" class="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer">
+          <div class="flex justify-between text-[10px] text-slate-500 font-mono">
+            <span>300 L</span>
+            <span>10.000 L</span>
+            <span>20.000 L</span>
+          </div>
+        </div>
+
+        <!-- Compartments Multiple Checkboxes -->
+        <div class="space-y-2 pt-1">
+          <span class="block text-xs text-slate-300 font-medium">Compartimente & Echipamente Secundare:</span>
+          
+          <label class="flex items-center justify-between p-2.5 rounded-lg bg-slate-900 border border-slate-800 cursor-pointer hover:border-slate-700">
+            <div class="flex items-center gap-2">
+              <input type="checkbox" id="chk-mod-stingere" checked onchange="updateFireTruckPrice()" class="rounded bg-slate-800 border-slate-700 text-cyan-500 focus:ring-0">
+              <span class="text-xs text-slate-200">Modul Stingere Intervenții Grele</span>
+            </div>
+            <span class="text-xs font-mono text-emerald-400">+15.000 LEI</span>
+          </label>
+
+          <label class="flex items-center justify-between p-2.5 rounded-lg bg-slate-900 border border-slate-800 cursor-pointer hover:border-slate-700">
+            <div class="flex items-center gap-2">
+              <input type="checkbox" id="chk-mod-descarcerare" onchange="updateFireTruckPrice()" class="rounded bg-slate-800 border-slate-700 text-cyan-500 focus:ring-0">
+              <span class="text-xs text-slate-200">Modul Descarcerare & HazMat</span>
+            </div>
+            <span class="text-xs font-mono text-emerald-400">+22.000 LEI</span>
+          </label>
+
+          <label class="flex items-center justify-between p-2.5 rounded-lg bg-slate-900 border border-slate-800 cursor-pointer hover:border-slate-700">
+            <div class="flex items-center gap-2">
+              <input type="checkbox" id="chk-mod-primajutor" onchange="updateFireTruckPrice()" class="rounded bg-slate-800 border-slate-700 text-cyan-500 focus:ring-0">
+              <span class="text-xs text-slate-200">Modul Prim Ajutor & Resuscitare</span>
+            </div>
+            <span class="text-xs font-mono text-emerald-400">+18.000 LEI</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Live Dynamic Price Box -->
+      <div class="bg-gradient-to-r from-slate-900 to-slate-950 p-4 rounded-xl border border-cyan-500/30 flex justify-between items-center">
+        <div>
+          <div class="text-[10px] text-slate-400 uppercase font-semibold">Preț Total Calculat</div>
+          <div class="text-[11px] text-cyan-400">Include configurarea selectată</div>
+        </div>
+        <div id="display-calculated-vehicle-price" class="font-orbitron text-xl font-bold text-amber-400">
+          80.000 LEI
+        </div>
+      </div>
+
+      <!-- Actions -->
+      <div class="flex gap-3">
+        <button onclick="closeModal('modal-vehicle-shop')" class="flex-1 py-3 rounded-xl bg-slate-800 text-slate-300 font-semibold text-xs hover:bg-slate-700">
+          Anulează
+        </button>
+        <button onclick="confirmVehiclePurchase()" class="flex-1 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs shadow-lg shadow-emerald-500/20">
+          Cumpără Vehicul
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Custom Notification Banner -->
+  <div id="toast-container" class="fixed bottom-5 right-5 z-50 space-y-2 pointer-events-none"></div>
+
+  <script>
+    /* =========================================================================
+       GLOBAL APP STATE & LOCALSTORAGE SYNC
+       ========================================================================= */
+    const STORAGE_KEY = 'DISPECERAT_112_DATA_V1';
+
+    let state = {
+      budget: 250000,
+      maxDistanceKm: 25,
+      showCoverageCircles: true,
+      mapTileStyle: 'dark',
+      stations: [], // { id, name, lat, lng }
+      vehicles: [], // { id, stationId, type, name, waterCap, compartments, status: 'idle'|'dispatched'|'on_scene'|'returning', lat, lng, route: [], routeIdx: 0, missionId: null }
+      missions: []  // { id, title, type: 'fire'|'police'|'smurd', reqType, lat, lng, reward, status: 'active'|'assigned'|'completed' }
+    };
+
+    let pendingStationCoords = null;
+    let isPlacementMode = false;
+    let activeStationShopId = null;
+    let map = null;
+    let tileLayer = null;
+    let mapMarkers = {
+      stations: {},
+      missions: {},
+      vehicles: {},
+      circles: {},
+      routes: {}
+    };
+
+    /* =========================================================================
+       WEB AUDIO SYNTHESIZER ENGINE
+       ========================================================================= */
+    const AudioEngine = {
+      ctx: null,
+      muted: false,
+      init() {
+        if (!this.ctx) {
+          this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+      },
+      playDispatchAlert() {
+        if (this.muted) return;
+        this.init();
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(880, now);
+        osc.frequency.setValueAtTime(1200, now + 0.12);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.3);
+      },
+      playSirenTone() {
+        if (this.muted) return;
+        this.init();
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(500, now);
+        osc.frequency.linearRampToValueAtTime(850, now + 0.25);
+        osc.frequency.linearRampToValueAtTime(500, now + 0.5);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.55);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.55);
+      },
+      playSuccessChime() {
+        if (this.muted) return;
+        this.init();
+        const now = this.ctx.currentTime;
+        [523.25, 659.25, 783.99].forEach((freq, i) => {
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = 'triangle';
+          osc.frequency.value = freq;
+          gain.gain.setValueAtTime(0.15, now + i * 0.08);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.08 + 0.25);
+          osc.connect(gain);
+          gain.connect(this.ctx.destination);
+          osc.start(now + i * 0.08);
+          osc.stop(now + i * 0.08 + 0.25);
+        });
+      }
+    };
+
+    function toggleAudio() {
+      AudioEngine.muted = !AudioEngine.muted;
+      const icon = document.getElementById('audio-icon');
+      if (AudioEngine.muted) {
+        icon.className = 'fa-solid fa-volume-xmark text-slate-500';
+        showToast('Sunet dezactivat', 'info');
+      } else {
+        icon.className = 'fa-solid fa-volume-high text-cyan-400';
+        AudioEngine.playDispatchAlert();
+        showToast('Sunet activat', 'info');
+      }
+    }
+
+    /* =========================================================================
+       INITIALIZATION & LEAFLET MAP SETUP
+       ========================================================================= */
+    window.onload = function() {
+      loadSavedState();
+      initMap();
+      renderUI();
+      startGameLoop();
+      startCallGeneratorTimer();
+    };
+
+    function initMap() {
+      // Default centered on Bucharest / Romania center
+      map = L.map('map', {
+        center: [44.4323, 26.1063],
+        zoom: 12,
+        zoomControl: false
+      });
+
+      L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+      setMapTileProvider(state.mapTileStyle);
+
+      // Map Click Event for Station Placement
+      map.on('click', function(e) {
+        if (isPlacementMode) {
+          pendingStationCoords = e.latlng;
+          openStationNamingModal();
+        }
+      });
+    }
+
+    function setMapTileProvider(styleKey) {
+      if (tileLayer) map.removeLayer(tileLayer);
+
+      let url = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+      let attrib = '&copy; OpenStreetMap &copy; CARTO';
+
+      if (styleKey === 'osm') {
+        url = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+        attrib = '&copy; OpenStreetMap contributors';
+      } else if (styleKey === 'satellite') {
+        url = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+        attrib = 'Tiles &copy; Esri';
+      }
+
+      tileLayer = L.tileLayer(url, {
+        maxZoom: 19,
+        attribution: attrib
+      }).addTo(map);
+
+      state.mapTileStyle = styleKey;
+      saveState();
+    }
+
+    function changeMapTile(key) {
+      setMapTileProvider(key);
+      showToast('Stil hartă schimbat', 'info');
+    }
+
+    /* =========================================================================
+       STATION BUY & PLACEMENT LOGIC
+       ========================================================================= */
+    function startStationPlacementMode() {
+      if (state.budget < 100000) {
+        showToast('Buget insuficient! Ai nevoie de 100.000 LEI.', 'error');
+        return;
+      }
+
+      isPlacementMode = true;
+      document.getElementById('placement-banner').classList.remove('hidden');
+      document.getElementById('map').style.cursor = 'crosshair';
+      toggleMobileMenu(false);
+      showToast('Apasă pe hartă în locația dorită pentru a construi subunitatea', 'info');
+    }
+
+    function cancelStationPlacementMode() {
+      isPlacementMode = false;
+      document.getElementById('placement-banner').classList.add('hidden');
+      document.getElementById('map').style.cursor = '';
+    }
+
+    function openStationNamingModal() {
+      document.getElementById('input-station-name').value = `Detașamentul ${state.stations.length + 1} Pompieri`;
+      document.getElementById('modal-station-name').classList.remove('hidden');
+    }
+
+    function confirmStationPurchase() {
+      const name = document.getElementById('input-station-name').value.trim() || 'Subunitate 112';
+
+      if (state.budget < 100000) {
+        showToast('Buget insuficient!', 'error');
+        return;
+      }
+
+      // Deduct funds
+      state.budget -= 100000;
+
+      const newStation = {
+        id: 'st_' + Date.now(),
+        name: name,
+        lat: pendingStationCoords.lat,
+        lng: pendingStationCoords.lng
+      };
+
+      state.stations.push(newStation);
+      
+      // Auto create 1 default police & 1 smurd vehicle
+      state.vehicles.push({
+        id: 'v_' + Date.now() + '_1',
+        stationId: newStation.id,
+        type: 'police',
+        name: 'Poliție Duster',
+        waterCap: 0,
+        compartments: [],
+        status: 'idle',
+        lat: newStation.lat,
+        lng: newStation.lng,
+        route: [],
+        routeIdx: 0,
+        missionId: null
+      });
+
+      cancelStationPlacementMode();
+      closeModal('modal-station-name');
+      AudioEngine.playSuccessChime();
+      showToast(`A fost construită subunitatea "${name}"!`, 'success');
+
+      saveState();
+      renderUI();
+      renderMapElements();
+
+      // Pan map to new station
+      map.flyTo([newStation.lat, newStation.lng], 13);
+    }
+
+    /* =========================================================================
+       DYNAMIC VEHICLE CONFIGURATOR & DYNAMIC PRICING CALCULATOR
+       ========================================================================= */
+    function openVehicleShopModal(stationId) {
+      activeStationShopId = stationId;
+      document.getElementById('select-vehicle-type').value = 'fire_custom';
+      handleVehicleTypeChange('fire_custom');
+      document.getElementById('modal-vehicle-shop').classList.remove('hidden');
+    }
+
+    function handleVehicleTypeChange(val) {
+      const customBox = document.getElementById('fire-truck-customizer');
+      if (val === 'fire_custom') {
+        customBox.classList.remove('hidden');
+      } else {
+        customBox.classList.add('hidden');
+      }
+      updateFireTruckPrice();
+    }
+
+    function updateFireTruckPrice() {
+      const type = document.getElementById('select-vehicle-type').value;
+      const priceDisplay = document.getElementById('display-calculated-vehicle-price');
+
+      if (type === 'police') {
+        priceDisplay.textContent = '35.000 LEI';
+        return 35000;
+      } else if (type === 'smurd') {
+        priceDisplay.textContent = '55.000 LEI';
+        return 55000;
+      }
+
+      // Dynamic calculation for fire truck
+      const waterLiters = parseInt(document.getElementById('input-water-capacity').value);
+      document.getElementById('display-water-val').textContent = `${waterLiters.toLocaleString('ro-RO')} Litri`;
+
+      const basePrice = 25000;
+      const waterCost = waterLiters * 6; // 6 LEI per Liter
+
+      let compartmentsCost = 0;
+      if (document.getElementById('chk-mod-stingere').checked) compartmentsCost += 15000;
+      if (document.getElementById('chk-mod-descarcerare').checked) compartmentsCost += 22000;
+      if (document.getElementById('chk-mod-primajutor').checked) compartmentsCost += 18000;
+
+      const totalPrice = basePrice + waterCost + compartmentsCost;
+      priceDisplay.textContent = `${totalPrice.toLocaleString('ro-RO')} LEI`;
+
+      return totalPrice;
+    }
+
+    function confirmVehiclePurchase() {
+      const price = updateFireTruckPrice();
+
+      if (state.budget < price) {
+        showToast('Buget insuficient pentru achiziție!', 'error');
+        return;
+      }
+
+      const station = state.stations.find(s => s.id === activeStationShopId);
+      if (!station) return;
+
+      const type = document.getElementById('select-vehicle-type').value;
+      let name = 'Autospecială ASAS Pompieri';
+      let waterCap = 0;
+      let compartments = [];
+
+      if (type === 'police') {
+        name = 'Echipaj Poliție Duster';
+      } else if (type === 'smurd') {
+        name = 'Ambulanță SMURD Tip B2';
+      } else {
+        waterCap = parseInt(document.getElementById('input-water-capacity').value);
+        if (document.getElementById('chk-mod-stingere').checked) compartments.push('Stingere');
+        if (document.getElementById('chk-mod-descarcerare').checked) compartments.push('Descarcerare');
+        if (document.getElementById('chk-mod-primajutor').checked) compartments.push('Prim Ajutor');
+        name = `ASAS Pompieri (${waterCap}L)`;
+      }
+
+      state.budget -= price;
+
+      const newVehicle = {
+        id: 'v_' + Date.now(),
+        stationId: station.id,
+        type: type,
+        name: name,
+        waterCap: waterCap,
+        compartments: compartments,
+        status: 'idle',
+        lat: station.lat,
+        lng: station.lng,
+        route: [],
+        routeIdx: 0,
+        missionId: null
+      };
+
+      state.vehicles.push(newVehicle);
+      AudioEngine.playSuccessChime();
+      showToast(`Vehiculul "${name}" cumpărat cu succes!`, 'success');
+
+      closeModal('modal-vehicle-shop');
+      saveState();
+      renderUI();
+      renderMapElements();
+    }
+
+    /* =========================================================================
+       112 EMERGENCY CALL GENERATOR & DISTANCE FILTER
+       ========================================================================= */
+    function updateMaxDistanceSlider(val) {
+      state.maxDistanceKm = parseInt(val);
+      document.getElementById('slider-distance-val').textContent = `${val} km`;
+      saveState();
+    }
+
+    function startCallGeneratorTimer() {
+      setInterval(() => {
+        if (state.stations.length === 0) return;
+        if (state.missions.length >= 8) return; // Limit active calls
+
+        generateRandom112Call();
+      }, 14000); // New call every 14s
+    }
+
+    function generateRandom112Call() {
+      if (state.stations.length === 0) return;
+
+      // Pick random station as epicenter
+      const station = state.stations[Math.floor(Math.random() * state.stations.length)];
+
+      // Generate random lat/lng within maxDistanceKm radius
+      const radiusKm = (Math.random() * 0.85 + 0.15) * state.maxDistanceKm; // min 15% of max
+      const angle = Math.random() * Math.PI * 2;
+
+      // 1 deg lat ~ 111km
+      const dLat = (radiusKm * Math.cos(angle)) / 111;
+      const dLng = (radiusKm * Math.sin(angle)) / (111 * Math.cos(station.lat * Math.PI / 180));
+
+      const callLat = station.lat + dLat;
+      const callLng = station.lng + dLng;
+
+      const callTemplates = [
+        { type: 'fire', reqType: 'fire_custom', title: 'Incendiu Anexă Gospodărească', reward: 8500 },
+        { type: 'fire', reqType: 'fire_custom', title: 'Incendiu de Vegetație Uscată', reward: 6000 },
+        { type: 'fire', reqType: 'fire_custom', title: 'Incendiu Garaj cu Pericol de Explozie', reward: 12000 },
+        { type: 'police', reqType: 'police', title: 'Accident Rutier cu Drum Blocat', reward: 4500 },
+        { type: 'police', reqType: 'police', title: 'Tulburarea Liniștii Publice / Scandal', reward: 3500 },
+        { type: 'smurd', reqType: 'smurd', title: 'Urgente Medicale - Stop Cardio-Respirator', reward: 7000 },
+        { type: 'smurd', reqType: 'smurd', title: 'Accident Casnic Grav cu Traumatisme', reward: 5500 }
+      ];
+
+      const template = callTemplates[Math.floor(Math.random() * callTemplates.length)];
+
+      const mission = {
+        id: 'm_' + Date.now(),
+        title: template.title,
+        type: template.type,
+        reqType: template.reqType,
+        lat: callLat,
+        lng: callLng,
+        reward: template.reward,
+        status: 'active'
+      };
+
+      state.missions.push(mission);
+      AudioEngine.playDispatchAlert();
+      showToast(`APEL NOU 112: ${mission.title}`, 'warning');
+
+      saveState();
+      renderUI();
+      renderMapElements();
+    }
+
+    /* =========================================================================
+       OSRM ROAD ROUTING ENGINE & DISPATCH
+       ========================================================================= */
+    async function fetchOSRMRoute(startLat, startLng, endLat, endLng) {
+      try {
+        const url = `https://router.project-osrm.org/route/v1/driving/${startLng},${startLat};${endLng},${endLat}?overview=full&geometries=geojson`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
+          // OSRM returns [lng, lat], map to Leaflet [lat, lng]
+          return data.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+        }
+      } catch (e) {
+        console.warn('OSRM Route fallback used', e);
+      }
+
+      // Linear fallback
+      const points = [];
+      const steps = 25;
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        points.push([
+          startLat + (endLat - startLat) * t,
+          startLng + (endLng - startLng) * t
+        ]);
+      }
+      return points;
+    }
+
+    async function dispatchVehicleToMission(vehicleId, missionId) {
+      const vehicle = state.vehicles.find(v => v.id === vehicleId);
+      const mission = state.missions.find(m => m.id === missionId);
+
+      if (!vehicle || !mission) return;
+
+      vehicle.status = 'dispatched';
+      vehicle.missionId = mission.id;
+      mission.status = 'assigned';
+
+      AudioEngine.playSirenTone();
+      showToast(`Echipajul "${vehicle.name}" trimis la misiune!`, 'info');
+
+      // Fetch road route
+      const routeCoords = await fetchOSRMRoute(vehicle.lat, vehicle.lng, mission.lat, mission.lng);
+      vehicle.route = routeCoords;
+      vehicle.routeIdx = 0;
+
+      saveState();
+      renderUI();
+      renderMapElements();
+    }
+
+    /* =========================================================================
+       GAME LOOP & REAL-TIME VEHICLE MOVEMENT PHYSICS
+       ========================================================================= */
+    function startGameLoop() {
+      setInterval(() => {
+        let stateChanged = false;
+
+        state.vehicles.forEach(vehicle => {
+          if ((vehicle.status === 'dispatched' || vehicle.status === 'returning') && vehicle.route.length > 0) {
+            
+            // Speed along route
+            const speedStep = 1; 
+            vehicle.routeIdx += speedStep;
+
+            if (vehicle.routeIdx < vehicle.route.length) {
+              const currPoint = vehicle.route[vehicle.routeIdx];
+              vehicle.lat = currPoint[0];
+              vehicle.lng = currPoint[1];
+              stateChanged = true;
+            } else {
+              // Reached endpoint
+              if (vehicle.status === 'dispatched') {
+                vehicle.status = 'on_scene';
+                vehicle.lat = vehicle.route[vehicle.route.length - 1][0];
+                vehicle.lng = vehicle.route[vehicle.route.length - 1][1];
+                
+                // Simulate on scene work timer
+                setTimeout(() => completeMissionWork(vehicle.id), 8000);
+              } else if (vehicle.status === 'returning') {
+                vehicle.status = 'idle';
+                vehicle.route = [];
+                vehicle.routeIdx = 0;
+                vehicle.missionId = null;
+                
+                // Snap to station
+                const st = state.stations.find(s => s.id === vehicle.stationId);
+                if (st) {
+                  vehicle.lat = st.lat;
+                  vehicle.lng = st.lng;
+                }
+              }
+              stateChanged = true;
+            }
+          }
+        });
+
+        if (stateChanged) {
+          updateVehiclePositionsOnMap();
+        }
+      }, 300);
+    }
+
+    async function completeMissionWork(vehicleId) {
+      const vehicle = state.vehicles.find(v => v.id === vehicleId);
+      if (!vehicle) return;
+
+      const missionIndex = state.missions.findIndex(m => m.id === vehicle.missionId);
+      if (missionIndex !== -1) {
+        const mission = state.missions[missionIndex];
+        
+        // Award reward
+        state.budget += mission.reward;
+        AudioEngine.playSuccessChime();
+        showToast(`Misiune finalizată! Recompensă: +${mission.reward.toLocaleString('ro-RO')} LEI`, 'success');
+
+        // Remove mission
+        state.missions.splice(missionIndex, 1);
+      }
+
+      // Return vehicle to station
+      const station = state.stations.find(s => s.id === vehicle.stationId);
+      if (station) {
+        vehicle.status = 'returning';
+        const returnRoute = await fetchOSRMRoute(vehicle.lat, vehicle.lng, station.lat, station.lng);
+        vehicle.route = returnRoute;
+        vehicle.routeIdx = 0;
+      } else {
+        vehicle.status = 'idle';
+      }
+
+      saveState();
+      renderUI();
+      renderMapElements();
+    }
+
+    /* =========================================================================
+       MAP MARKERS & VISUAL RENDERING
+       ========================================================================= */
+    function renderMapElements() {
+      // Clear old markers
+      Object.values(mapMarkers.stations).forEach(m => map.removeLayer(m));
+      Object.values(mapMarkers.circles).forEach(c => map.removeLayer(c));
+      Object.values(mapMarkers.missions).forEach(m => map.removeLayer(m));
+      Object.values(mapMarkers.vehicles).forEach(v => map.removeLayer(v));
+      Object.values(mapMarkers.routes).forEach(r => map.removeLayer(r));
+
+      mapMarkers.stations = {};
+      mapMarkers.circles = {};
+      mapMarkers.missions = {};
+      mapMarkers.vehicles = {};
+      mapMarkers.routes = {};
+
+      // 1. Render Stations
+      state.stations.forEach(station => {
+        const stationIcon = L.divIcon({
+          className: 'custom-leaflet-icon',
+          html: `<div class="w-10 h-10 rounded-xl bg-slate-900 border-2 border-cyan-400 text-cyan-400 flex items-center justify-center shadow-lg shadow-cyan-500/30 pulse-cyan">
+                   <i class="fa-solid fa-building-shield text-lg"></i>
+                 </div>`,
+          iconSize: [40, 40],
+          iconAnchor: [20, 20]
+        });
+
+        const marker = L.marker([station.lat, station.lng], { icon: stationIcon })
+          .addTo(map)
+          .bindTooltip(`<b>${station.name}</b>`, { permanent: false, direction: 'top' });
+
+        mapMarkers.stations[station.id] = marker;
+
+        // Coverage circle
+        if (state.showCoverageCircles) {
+          const circle = L.circle([station.lat, station.lng], {
+            radius: state.maxDistanceKm * 1000,
+            color: '#00f3ff',
+            weight: 1,
+            fillColor: '#00f3ff',
+            fillOpacity: 0.05
+          }).addTo(map);
+          mapMarkers.circles[station.id] = circle;
+        }
+      });
+
+      // 2. Render Missions
+      state.missions.forEach(mission => {
+        let colorClass = 'bg-red-600 border-red-300 text-white';
+        let iconClass = 'fa-fire';
+
+        if (mission.type === 'police') {
+          colorClass = 'bg-blue-600 border-blue-300 text-white';
+          iconClass = 'fa-shield-halved';
+        } else if (mission.type === 'smurd') {
+          colorClass = 'bg-emerald-600 border-emerald-300 text-white';
+          iconClass = 'fa-truck-medical';
+        }
+
+        const missionIcon = L.divIcon({
+          className: 'custom-leaflet-icon',
+          html: `<div class="w-9 h-9 rounded-full ${colorClass} border-2 flex items-center justify-center shadow-xl pulse-emergency">
+                   <i class="fa-solid ${iconClass} text-sm"></i>
+                 </div>`,
+          iconSize: [36, 36],
+          iconAnchor: [18, 18]
+        });
+
+        const marker = L.marker([mission.lat, mission.lng], { icon: missionIcon })
+          .addTo(map)
+          .bindTooltip(`<b>${mission.title}</b><br>Recompensă: ${mission.reward} LEI`, { direction: 'top' });
+
+        mapMarkers.missions[mission.id] = marker;
+      });
+
+      // 3. Render Vehicles & Routes
+      state.vehicles.forEach(vehicle => {
+        let vColor = 'text-amber-400 bg-slate-900 border-amber-400';
+        if (vehicle.type === 'police') vColor = 'text-blue-400 bg-slate-900 border-blue-400';
+        if (vehicle.type === 'smurd') vColor = 'text-emerald-400 bg-slate-900 border-emerald-400';
+
+        const vehicleIcon = L.divIcon({
+          className: 'custom-leaflet-icon',
+          html: `<div class="w-8 h-8 rounded-lg ${vColor} border-2 flex items-center justify-center shadow-md">
+                   <i class="fa-solid fa-truck-fast text-xs"></i>
+                 </div>`,
+          iconSize: [32, 32],
+          iconAnchor: [16, 16]
+        });
+
+        const marker = L.marker([vehicle.lat, vehicle.lng], { icon: vehicleIcon }).addTo(map);
+        mapMarkers.vehicles[vehicle.id] = marker;
+
+        // Draw neon route line if active
+        if (vehicle.route.length > 0 && (vehicle.status === 'dispatched' || vehicle.status === 'returning')) {
+          const polyline = L.polyline(vehicle.route, {
+            color: '#00f3ff',
+            weight: 4,
+            opacity: 0.8,
+            className: 'route-glow'
+          }).addTo(map);
+          mapMarkers.routes[vehicle.id] = polyline;
+        }
+      });
+    }
+
+    function updateVehiclePositionsOnMap() {
+      state.vehicles.forEach(vehicle => {
+        if (mapMarkers.vehicles[vehicle.id]) {
+          mapMarkers.vehicles[vehicle.id].setLatLng([vehicle.lat, vehicle.lng]);
+        }
+      });
+    }
+
+    function toggleCoverageCircles(show) {
+      state.showCoverageCircles = show;
+      saveState();
+      renderMapElements();
+    }
+
+    /* =========================================================================
+       UI RENDER PANEL FUNCTIONS
+       ========================================================================= */
+    function renderUI() {
+      // Top stats
+      document.getElementById('display-budget').textContent = `${state.budget.toLocaleString('ro-RO')} LEI`;
+      document.getElementById('display-stations-count').textContent = state.stations.length;
+      document.getElementById('display-missions-count').textContent = state.missions.length;
+
+      document.getElementById('badge-missions-tab').textContent = state.missions.length;
+      document.getElementById('badge-stations-tab').textContent = state.stations.length;
+
+      // Settings values
+      document.getElementById('input-max-distance').value = state.maxDistanceKm;
+      document.getElementById('slider-distance-val').textContent = `${state.maxDistanceKm} km`;
+      document.getElementById('toggle-coverage-circle').checked = state.showCoverageCircles;
+
+      renderMissionsList();
+      renderStationsList();
+    }
+
+    function renderMissionsList() {
+      const container = document.getElementById('missions-list');
+      container.innerHTML = '';
+
+      if (state.missions.length === 0) {
+        container.innerHTML = `
+          <div class="text-center py-10 text-slate-500 space-y-2">
+            <i class="fa-solid fa-shield-cat text-3xl text-slate-700"></i>
+            <p class="text-xs">Nicio intervenție activă în rază.</p>
+          </div>`;
+        return;
+      }
+
+      state.missions.forEach(mission => {
+        let badgeColor = 'bg-red-950/80 text-red-400 border-red-800';
+        if (mission.type === 'police') badgeColor = 'bg-blue-950/80 text-blue-400 border-blue-800';
+        if (mission.type === 'smurd') badgeColor = 'bg-emerald-950/80 text-emerald-400 border-emerald-800';
+
+        // Find available vehicles
+        const availVehicles = state.vehicles.filter(v => v.status === 'idle');
+
+        let dispatchControlsHtml = '';
+        if (mission.status === 'assigned') {
+          dispatchControlsHtml = `
+            <div class="text-xs text-amber-400 font-medium flex items-center gap-2 pt-2 border-t border-slate-800">
+              <i class="fa-solid fa-spinner animate-spin"></i> Echipaj în deplasare...
+            </div>`;
+        } else if (availVehicles.length === 0) {
+          dispatchControlsHtml = `
+            <div class="text-[11px] text-red-400 pt-2 border-t border-slate-800">
+              Niciun echipaj disponibil în garaje!
+            </div>`;
+        } else {
+          dispatchControlsHtml = `
+            <div class="pt-2 border-t border-slate-800 space-y-2">
+              <label class="text-[10px] text-slate-400 uppercase font-semibold">Trimite Echipaj Disponibil:</label>
+              <div class="flex gap-2">
+                <select id="select-dispatch-${mission.id}" class="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-200">
+                  ${availVehicles.map(v => `<option value="${v.id}">${v.name}</option>`).join('')}
+                </select>
+                <button onclick="dispatchVehicleToMission(document.getElementById('select-dispatch-${mission.id}').value, '${mission.id}')" class="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs rounded-lg shadow-md">
+                  Trimite
+                </button>
+              </div>
+            </div>`;
+        }
+
+        const card = document.createElement('div');
+        card.className = 'glass-panel p-3 rounded-xl space-y-2 border border-slate-800 hover:border-slate-700 transition';
+        card.innerHTML = `
+          <div class="flex justify-between items-start">
+            <span class="text-xs px-2 py-0.5 rounded border ${badgeColor} font-bold uppercase tracking-wider">
+              ${mission.type.toUpperCase()}
+            </span>
+            <span class="font-orbitron text-xs font-bold text-emerald-400">+${mission.reward.toLocaleString('ro-RO')} LEI</span>
+          </div>
+          <h4 class="text-sm font-bold text-slate-100">${mission.title}</h4>
+          ${dispatchControlsHtml}
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    function renderStationsList() {
+      const container = document.getElementById('stations-list');
+      container.innerHTML = '';
+
+      if (state.stations.length === 0) {
+        container.innerHTML = `
+          <div class="text-center py-8 text-slate-500 space-y-2">
+            <i class="fa-solid fa-building-circle-xmark text-3xl text-slate-700"></i>
+            <p class="text-xs">Nu ai construit nicio subunitate pe hartă.</p>
+          </div>`;
+        return;
+      }
+
+      state.stations.forEach(station => {
+        const stationVehicles = state.vehicles.filter(v => v.stationId === station.id);
+
+        const card = document.createElement('div');
+        card.className = 'glass-panel p-4 rounded-xl space-y-3 border border-slate-800';
+        card.innerHTML = `
+          <div class="flex justify-between items-center border-b border-slate-800 pb-2">
+            <div>
+              <h4 class="text-sm font-bold text-cyan-400 flex items-center gap-2">
+                <i class="fa-solid fa-warehouse"></i> ${station.name}
+              </h4>
+              <p class="text-[10px] text-slate-400">Garaj: ${stationVehicles.length} / 10 Vehicule</p>
+            </div>
+            <button onclick="openVehicleShopModal('${station.id}')" class="px-2.5 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-400 font-semibold text-xs flex items-center gap-1">
+              <i class="fa-solid fa-plus"></i> Cumpără Vehicul
+            </button>
+          </div>
+
+          <div class="space-y-1.5">
+            ${stationVehicles.length === 0 ? '<div class="text-[11px] text-slate-500 italic">Garaj gol</div>' : ''}
+            ${stationVehicles.map(v => {
+              let statusBadge = '<span class="text-[10px] text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800">Disponibil</span>';
+              if (v.status === 'dispatched') statusBadge = '<span class="text-[10px] text-amber-400 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800">În deplasare</span>';
+              if (v.status === 'on_scene') statusBadge = '<span class="text-[10px] text-red-400 bg-red-950/60 px-2 py-0.5 rounded border border-red-800">Intervine</span>';
+              if (v.status === 'returning') statusBadge = '<span class="text-[10px] text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-800">Se întoarce</span>';
+
+              return `
+                <div class="bg-slate-950/80 p-2 rounded-lg border border-slate-800/80 flex items-center justify-between text-xs">
+                  <span class="font-medium text-slate-200">${v.name}</span>
+                  ${statusBadge}
+                </div>
+              `;
+            }).join('')}
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    /* =========================================================================
+       UI TABS, MODAL & UTILITY HELPERS
+       ========================================================================= */
+    function switchTab(tabName) {
+      ['missions', 'stations', 'settings'].forEach(t => {
+        const btn = document.getElementById(`tab-btn-${t}`);
+        const content = document.getElementById(`tab-content-${t}`);
+        if (t === tabName) {
+          btn.className = 'flex-1 py-2.5 text-xs font-semibold rounded-lg bg-slate-800 text-cyan-400 flex items-center justify-center gap-2 transition';
+          content.classList.remove('hidden');
+        } else {
+          btn.className = 'flex-1 py-2.5 text-xs font-semibold rounded-lg text-slate-400 hover:text-slate-200 flex items-center justify-center gap-2 transition';
+          content.classList.add('hidden');
+        }
+      });
+    }
+
+    function toggleMobileMenu(forceState) {
+      const sidebar = document.getElementById('sidebar');
+      if (forceState !== undefined) {
+        if (forceState) sidebar.classList.remove('-translate-x-full');
+        else sidebar.classList.add('-translate-x-full');
+      } else {
+        sidebar.classList.toggle('-translate-x-full');
+      }
+    }
+
+    function closeModal(id) {
+      document.getElementById(id).classList.add('hidden');
+    }
+
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+
+      let borderCol = 'border-cyan-500/50 text-cyan-200';
+      if (type === 'error') borderCol = 'border-red-500/50 text-red-200';
+      if (type === 'success') borderCol = 'border-emerald-500/50 text-emerald-200';
+      if (type === 'warning') borderCol = 'border-amber-500/50 text-amber-200';
+
+      toast.className = `glass-panel px-4 py-3 rounded-xl border ${borderCol} shadow-2xl text-xs font-medium flex items-center gap-2 transform transition duration-300 translate-y-2 pointer-events-auto`;
+      toast.innerHTML = `<i class="fa-solid fa-circle-info"></i> <span>${message}</span>`;
+
+      container.appendChild(toast);
+
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        setTimeout(() => toast.remove(), 300);
+      }, 3500);
+    }
+
+    /* =========================================================================
+       LOCALSTORAGE PERSISTENCE
+       ========================================================================= */
+    function saveState() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+
+    function loadSavedState() {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          state = { ...state, ...parsed };
+        } catch (e) {
+          console.error('Error loading saved state', e);
+        }
+      }
+    }
+
+    function resetDataPrompt() {
+      if (window.confirm && window.confirm("Ești sigur că vrei să resetezi toate datele și progresul?")) {
+        localStorage.removeItem(STORAGE_KEY);
+        window.location.reload();
+      }
+    }
+  </script>
+</body>
+</html>
