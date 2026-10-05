@@ -39,6 +39,13 @@ let mapMarkers = {
   routes: {}
 };
 
+// Id-ul vehiculului cu popup-ul de detalii deschis (viteza / ETA live).
+let openVehiclePopupId = null;
+
+// True cat timp renderMapElements() reconstruieste markerii: altfel popup-ul
+// deschis se pierde la fiecare re-randare (apel 112 nou, expirare, etc.).
+let isRenderingMap = false;
+
 // ------------------------------------------------------------------------
 // GEO HELPERS & CONSTANTE DE SIMULARE
 // ------------------------------------------------------------------------
@@ -52,6 +59,47 @@ const SIM_SPEED_MULTIPLIER = 60;
 // Viteze medii urbane (km/h) per tip de echipaj.
 
 const VEHICLE_SPEEDS = { police: 70, smurd: 65, fire_custom: 50 };
+
+// --- Fizica de deplasare (viteze reale, nu constante) --------------------
+// Viteza nu mai e o constanta: echipajul pleaca de pe loc, accelereaza, incetineste
+// in curbe si inainte de viraje. Limita de drum e estimata din geometria rutei
+// (OSRM public nu trimite maxspeed), iar regimul de urgenta permite depasirea ei.
+// Profil per tip de echipaj:
+//   maxKmh  - plafonul absolut al vehiculului
+//   accel   - acceleratie in m/s^2
+//   brake   - deceleratie in m/s^2 la franare
+//   urgency - cat de mult poate depasi limita drumului (regim prioritar)
+
+const VEHICLE_PROFILES = {
+  police:      { maxKmh: 145, accel: 3.0, brake: 7.0, urgency: 1.45 },
+  smurd:       { maxKmh: 125, accel: 2.4, brake: 6.0, urgency: 1.35 },
+  fire_custom: { maxKmh: 95,  accel: 1.5, brake: 4.5, urgency: 1.20 }
+};
+
+function vehicleProfile(vehicle) {
+  return VEHICLE_PROFILES[vehicle && vehicle.type] || VEHICLE_PROFILES.police;
+}
+
+// Sub-pasul de integrare a fizicii (tick-urile sunt la 300 ms; 0.5 s e stabil).
+const PHYSICS_SUBSTEP_SEC = 0.5;
+
+// Cat de repede se simte accelerarea/franarea la scara jocului.
+// Simularea comprima timpul de 60x, dar acceleratia rămâne la scara de ecran:
+// 0 -> 100 km/h in ~1.2 s de joc (altfel, pe o ruta de 8 km masina nu apuca
+// sa treaca de 50 km/h si "masina de urgenta" nu se simtea deloc).
+const PHYSICS_TIME_SCALE = 8;
+
+// Acceleratia/deceleratia raportata la spatiul hartii (m/s^2 pe km de harta):
+// distantele din formula de franare anticipata sunt in metri de harta.
+function spatialAccelMs2(ms2) {
+  return (ms2 * PHYSICS_TIME_SCALE) / SIM_SPEED_MULTIPLIER;
+}
+
+// Cat de departe ne uitam la virajele din fata cand calculam franarea (km).
+const CORNER_LOOKAHEAD_KM = 0.8;
+
+// Sub aceasta distanta de destinatie (km) incepe franarea de oprire.
+const ARRIVAL_SLOWDOWN_KM = 0.07;
 
 // Fereastra de raspuns pentru un apel 112 (secunde reale).
 
@@ -78,6 +126,52 @@ function haversineKm(lat1, lng1, lat2, lng2) {
   const a = Math.sin(dLat / 2) ** 2 +
             Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
   return 2 * EARTH_R * Math.asin(Math.sqrt(a));
+}
+
+// Cursul (bearing) in grade intre doua puncte.
+
+function bearingDeg(lat1, lng1, lat2, lng2) {
+  const toRad = d => (d * Math.PI) / 180;
+  const y = Math.sin(toRad(lng2 - lng1)) * Math.cos(toRad(lat2));
+  const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+            Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lng2 - lng1));
+  return (Math.atan2(y, x) * 180) / Math.PI;
+}
+
+// Unghiul de schimbare de directie la punctul din mijloc (0 = drept inainte).
+
+function turnAngleDeg(lat1, lng1, lat2, lng2, lat3, lng3) {
+  const d = bearingDeg(lat2, lng2, lat3, lng3) - bearingDeg(lat1, lng1, lat2, lng2);
+  return Math.abs(((d + 540) % 360) - 180);
+}
+
+// Limita de drum (km/h) estimata din unghiul virajului.
+
+function roadSpeedFromAngle(deg) {
+  if (deg < 6) return 110;   // drum drept (DN / european)
+  if (deg < 15) return 85;
+  if (deg < 30) return 60;
+  if (deg < 50) return 45;
+  if (deg < 75) return 32;
+  return 22;                 // viraj strans / manevra in intersectie
+}
+
+// Limita de viteza estimata pentru fiecare segment al rutei.
+// Segmentul primeste limita nodului de la inceputul lui; franarea anticipata
+// din vehicleTargetSpeedKmh() se ocupa de incetinirea INAINTE de viraj.
+
+function estimateSegmentSpeeds(route) {
+  const n = route ? route.length : 0;
+  if (n < 2) return [];
+  const nodeLimit = new Array(n).fill(110);
+  for (let i = 1; i < n - 1; i++) {
+    nodeLimit[i] = roadSpeedFromAngle(
+      turnAngleDeg(route[i - 1][0], route[i - 1][1], route[i][0], route[i][1], route[i + 1][0], route[i + 1][1])
+    );
+  }
+  const speeds = new Array(n - 1);
+  for (let j = 0; j < n - 1; j++) speeds[j] = nodeLimit[j];
+  return speeds;
 }
 
 // Punct aleator distribuit uniform in discul de raza radiusKm
@@ -113,10 +207,46 @@ function buildRouteMetrics(route) {
   return { cum: cum, totalKm: cum.length ? cum[cum.length - 1] : 0 };
 }
 
-// Avanseaza vehiculul pe ruta cu `speedKmh` pe durata `dtSec` de timp real.
+// Viteza tinta (km/h) in punctul curent: limita drumului x regim de urgenta,
+// plafonata de vehicul, cu franare anticipata pentru virajele din fata si
+// incetinire lina la apropierea de destinatie.
 
-// Viteza e constanta in km/h indiferent de cate puncte are ruta.
+function vehicleTargetSpeedKmh(vehicle, distKm, segIdx) {
+  const p = vehicleProfile(vehicle);
+  const speeds = vehicle.routeSpeeds;
 
+  let target = p.maxKmh;
+  if (speeds && speeds.length) {
+    const i = Math.min(Math.max(segIdx | 0, 0), speeds.length - 1);
+    const here = speeds[i] == null ? 60 : speeds[i];
+    target = Math.min(p.maxKmh, here * p.urgency);
+
+    const cum = vehicle.routeCum;
+    if (cum) {
+      const aSpatial = spatialAccelMs2(p.brake);
+      for (let j = i + 1; j < speeds.length; j++) {
+        const dKm = cum[j] - distKm;
+        if (dKm > CORNER_LOOKAHEAD_KM) break;
+        // viteza maxima pe care o pot avea ACUM ca sa pot frana la timp la limita de acolo
+        const vNextMs = Math.min(p.maxKmh, speeds[j] * p.urgency) / 3.6;
+        const allowed = Math.sqrt(vNextMs * vNextMs + 2 * aSpatial * Math.max(0, dKm * 1000)) * 3.6;
+        if (allowed < target) target = allowed;
+      }
+      const total = cum[cum.length - 1];
+      const leftKm = total - distKm;
+      if (leftKm < ARRIVAL_SLOWDOWN_KM) {
+        const vArr = Math.sqrt(Math.max(0, 2 * aSpatial * leftKm * 1000)) * 3.6;
+        target = Math.min(target, Math.max(8, vArr));
+      }
+    }
+  }
+  return Math.max(0, target);
+}
+
+// Avanseaza vehiculul cu fizica reala (accelerare / franare treptata) pe `dtSec`
+// secunde de timp real, apoi il pozitioneaza pe ruta.
+// Distanta parcursa e accelerata de SIM_SPEED_MULTIPLIER, dar viteza afisata ramane
+// in km/h reali, iar ETA se masoara in secunde de joc (ca si countdown-urile).
 // Returneaza true daca a ajuns la capatul rutei.
 
 function advanceVehicleAlongRoute(vehicle, dtSec) {
@@ -125,30 +255,77 @@ function advanceVehicleAlongRoute(vehicle, dtSec) {
   if (!route || route.length < 2 || !cum || cum.length < 2) return true;
 
   const totalKm = cum[cum.length - 1];
-  const speedKmh = vehicle.speedKmh || 60;
-  const simKm = (speedKmh * SIM_SPEED_MULTIPLIER * dtSec) / 3600;
-  const travelled = (vehicle.distKm || 0) + simKm;
+  const p = vehicleProfile(vehicle);
+  vehicle.distKm = vehicle.distKm || 0;
+  vehicle.speedKmh = vehicle.speedKmh || 0;
 
-  if (travelled >= totalKm) {
+  let remaining = Math.max(0, dtSec || 0);
+  while (remaining > 1e-9 && vehicle.distKm < totalKm) {
+    const dt = Math.min(remaining, PHYSICS_SUBSTEP_SEC);
+    remaining -= dt;
+
+    const target = vehicleTargetSpeedKmh(vehicle, vehicle.distKm, vehicle.segIdx || 0);
+    const dv = target - vehicle.speedKmh;
+    const rate = (dv >= 0 ? p.accel : p.brake) * 3.6 * PHYSICS_TIME_SCALE * dt; // m/s^2 -> km/h pe sub-pas
+    if (dv >= 0) vehicle.speedKmh = Math.min(target, vehicle.speedKmh + rate);
+    else vehicle.speedKmh = Math.max(target, vehicle.speedKmh - rate);
+
+    vehicle.distKm += (vehicle.speedKmh * SIM_SPEED_MULTIPLIER * dt) / 3600;
+  }
+
+  if (vehicle.distKm >= totalKm) {
     vehicle.distKm = totalKm;
     vehicle.segIdx = route.length - 1;
+    vehicle.speedKmh = 0; // oprit la destinatie
     vehicle.lat = route[route.length - 1][0];
     vehicle.lng = route[route.length - 1][1];
     return true;
   }
 
-  vehicle.distKm = travelled;
-
   let i = vehicle.segIdx || 0;
-  while (i < cum.length - 2 && cum[i + 1] < travelled) i++;
-  while (i > 0 && cum[i] > travelled) i--;
+  while (i < cum.length - 2 && cum[i + 1] < vehicle.distKm) i++;
+  while (i > 0 && cum[i] > vehicle.distKm) i--;
   vehicle.segIdx = i;
 
   const segLen = cum[i + 1] - cum[i];
-  const t = segLen > 0 ? (travelled - cum[i]) / segLen : 0;
+  const t = segLen > 0 ? (vehicle.distKm - cum[i]) / segLen : 0;
   vehicle.lat = route[i][0] + (route[i + 1][0] - route[i][0]) * t;
   vehicle.lng = route[i][1] + (route[i + 1][1] - route[i][1]) * t;
   return false;
+}
+
+// ETA in secunde de joc: ruleaza exact aceeasi fizica pe o copie a vehiculului
+// pana la capatul rutei, deci ETA-ul afisat corespunde miscarii reale.
+
+function simulateEtaSeconds(vehicle, maxSeconds) {
+  const route = vehicle && vehicle.route;
+  const cum = vehicle && vehicle.routeCum;
+  if (!route || route.length < 2 || !cum || cum.length < 2) return 0;
+  const limit = maxSeconds || 7200;
+  const sim = {
+    type: vehicle.type,
+    route: route,
+    routeCum: cum,
+    routeSpeeds: vehicle.routeSpeeds,
+    distKm: vehicle.distKm || 0,
+    segIdx: vehicle.segIdx || 0,
+    speedKmh: vehicle.speedKmh || 0
+  };
+  // Pas de 0.1 s: ETA ramane precis si pe rute de cateva secunde.
+  const STEP = 0.1;
+  let t = 0;
+  while (t < limit) {
+    if (advanceVehicleAlongRoute(sim, STEP)) break;
+    t += STEP;
+  }
+  return t;
+}
+
+// Secunde -> "m:ss" pentru ETA.
+
+function formatDuration(sec) {
+  const s = Math.max(0, Math.round(sec || 0));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
 }
 
 // Seteaza ruta + metricile de distanta, resetand progresul.
@@ -158,9 +335,11 @@ function setVehicleRoute(vehicle, route) {
   const m = buildRouteMetrics(route);
   vehicle.routeCum = m.cum;
   vehicle.routeTotalKm = m.totalKm;
+  vehicle.routeSpeeds = estimateSegmentSpeeds(route);
   vehicle.distKm = 0;
   vehicle.segIdx = 0;
   vehicle.routeIdx = 0;
+  vehicle.speedKmh = 0; // pleaca de pe loc
   vehicle.lat = route[0][0];
   vehicle.lng = route[0][1];
 }

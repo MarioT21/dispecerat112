@@ -163,6 +163,7 @@ function refreshCoverageCircles() {
 // ------------------------------------------------------------------------
 
 function renderMapElements() {
+  isRenderingMap = true;
   // Clear old markers
   Object.values(mapMarkers.stations).forEach(m => map.removeLayer(m));
   Object.values(mapMarkers.circles).forEach(c => map.removeLayer(c));
@@ -250,7 +251,22 @@ function renderMapElements() {
       iconAnchor: [16, 16]
     });
 
-    const marker = L.marker([vehicle.lat, vehicle.lng], { icon: vehicleIcon }).addTo(map);
+    // Click pe vehicul -> popup cu viteza curenta, limita de drum, distanta
+    // ramasa si timpul estimat pana la destinatie (reimprospatate live).
+    const marker = L.marker([vehicle.lat, vehicle.lng], { icon: vehicleIcon })
+      .addTo(map)
+      .bindPopup(() => vehiclePopupHtml(vehicle), {
+        className: 'd112-popup',
+        closeButton: true,
+        autoPan: false,
+        offset: [0, -6]
+      });
+
+    marker.on('popupopen', () => { openVehiclePopupId = vehicle.id; });
+    marker.on('popupclose', () => {
+      if (!isRenderingMap && openVehiclePopupId === vehicle.id) openVehiclePopupId = null;
+    });
+
     mapMarkers.vehicles[vehicle.id] = marker;
 
     // Draw neon route line if active
@@ -266,6 +282,88 @@ function renderMapElements() {
       mapMarkers.routes[vehicle.id] = polyline;
     }
   });
+
+  isRenderingMap = false;
+  restoreOpenVehiclePopup();
+}
+
+// Re-deschide popup-ul de vehicul dupa o re-randare completa a hartii.
+
+function restoreOpenVehiclePopup() {
+  if (!openVehiclePopupId) return;
+  const marker = mapMarkers.vehicles[openVehiclePopupId];
+  if (marker && typeof marker.openPopup === 'function') marker.openPopup();
+}
+
+// ========================================================================
+// POPUP DETALII VEHICUL (click pe vehicul)
+// ========================================================================
+
+function vehicleStatusLabel(vehicle) {
+  if (vehicle.status === 'dispatched') return 'In deplasare spre intervenție';
+  if (vehicle.status === 'on_scene') return 'Intervine la fața locului';
+  if (vehicle.status === 'returning') return 'Se întoarce la subunitate';
+  return 'Disponibil în garaj';
+}
+
+function vehicleDestinationLabel(vehicle) {
+  if (vehicle.missionId) {
+    const m = state.missions.find(x => x.id === vehicle.missionId);
+    if (m) return m.title;
+  }
+  const st = state.stations.find(s => s.id === vehicle.stationId);
+  return st ? st.name : '—';
+}
+
+// Viteza instanta + limita de drum estimata + distanta ramasa + ETA.
+
+function vehiclePopupHtml(vehicle) {
+  const moving = (vehicle.status === 'dispatched' || vehicle.status === 'returning') &&
+                 !!vehicle.route && vehicle.route.length > 1;
+  const speed = Math.round(vehicle.speedKmh || 0);
+  const totalKm = vehicle.routeTotalKm || 0;
+  const doneKm = vehicle.distKm || 0;
+  const leftKm = moving ? Math.max(0, totalKm - doneKm) : 0;
+  const pct = totalKm > 0 ? Math.min(100, Math.round((doneKm / totalKm) * 100)) : 0;
+
+  let roadLimit = 0;
+  if (moving && vehicle.routeSpeeds && vehicle.routeSpeeds.length) {
+    const i = Math.min(Math.max(vehicle.segIdx || 0, 0), vehicle.routeSpeeds.length - 1);
+    roadLimit = Math.round(vehicle.routeSpeeds[i] || 0);
+  }
+  const eta = moving ? simulateEtaSeconds(vehicle) : 0;
+
+  const rows = moving ? `
+      <div class="flex justify-between gap-3"><span class="text-slate-400">Viteză curentă</span><b class="font-orbitron text-cyan-300">${speed} km/h</b></div>
+      <div class="flex justify-between gap-3"><span class="text-slate-400">Limită drum (est.)</span><b class="font-orbitron text-amber-300">${roadLimit} km/h</b></div>
+      <div class="flex justify-between gap-3"><span class="text-slate-400">Distanță rămasă</span><b class="font-orbitron text-slate-200">${leftKm.toFixed(1)} / ${totalKm.toFixed(1)} km</b></div>
+      <div class="flex justify-between gap-3"><span class="text-slate-400">Timp estimat</span><b class="font-orbitron text-emerald-300">${formatDuration(eta)}</b></div>
+      <div class="mt-1 h-1.5 rounded bg-slate-800 overflow-hidden"><div class="h-full bg-cyan-400" style="width:${pct}%"></div></div>` : `
+      <div class="flex justify-between gap-3"><span class="text-slate-400">Viteză curentă</span><b class="font-orbitron text-slate-300">0 km/h</b></div>
+      <div class="text-slate-400 italic">Echipajul este în rezervă.</div>`;
+
+  return `
+    <div class="min-w-[200px] font-sans">
+      <div class="text-xs font-bold text-slate-100">${vehicle.name}</div>
+      <div class="mt-0.5 text-[10px] uppercase tracking-wider text-cyan-400">${vehicleStatusLabel(vehicle)}</div>
+      <div class="mt-2 space-y-1 text-[11px]">${rows}</div>
+      <div class="mt-2 pt-2 border-t border-slate-800 text-[11px] text-slate-400">
+        <i class="fa-solid fa-location-dot mr-1"></i>${vehicleDestinationLabel(vehicle)}
+      </div>
+    </div>`;
+}
+
+// Reimprospateaza popup-ul deschis (apelat la 1s din startTimersLoop).
+
+function refreshOpenVehiclePopup() {
+  if (!openVehiclePopupId) return;
+  const marker = mapMarkers.vehicles[openVehiclePopupId];
+  const vehicle = state.vehicles.find(v => v.id === openVehiclePopupId);
+  if (!marker || !vehicle) { openVehiclePopupId = null; return; }
+  if (typeof marker.isPopupOpen === 'function' && !marker.isPopupOpen()) return;
+  if (typeof marker.setPopupContent === 'function') {
+    marker.setPopupContent(vehiclePopupHtml(vehicle));
+  }
 }
 
 function updateVehiclePositionsOnMap() {

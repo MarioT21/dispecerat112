@@ -96,6 +96,22 @@
       background: transparent;
       border: none;
     }
+
+    /* Popup detalii vehicul (viteza / ETA) in stil tactical */
+    .d112-popup .leaflet-popup-content-wrapper {
+      background: rgba(11, 15, 25, 0.96);
+      color: #e2e8f0;
+      border: 1px solid rgba(0, 243, 255, 0.35);
+      border-radius: 12px;
+      backdrop-filter: blur(14px);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+    }
+    .d112-popup .leaflet-popup-content { margin: 8px 10px; }
+    .d112-popup .leaflet-popup-tip {
+      background: rgba(11, 15, 25, 0.96);
+      border: 1px solid rgba(0, 243, 255, 0.35);
+    }
+    .d112-popup a.leaflet-popup-close-button { color: #64748b; }
   </style>
 </head>
 <body class="h-screen w-screen flex flex-col justify-between overflow-hidden select-none">

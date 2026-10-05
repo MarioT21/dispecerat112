@@ -33,6 +33,7 @@ function recoverStuckVehicles() {
         const metrics = buildRouteMetrics(v.route);
         v.routeCum = metrics.cum;
         v.routeTotalKm = metrics.totalKm;
+        v.routeSpeeds = estimateSegmentSpeeds(v.route); // si pentru salvarile vechi
         v.distKm = v.distKm || 0;
         v.segIdx = v.segIdx || 0;
         advanceVehicleAlongRoute(v, 0);
@@ -301,7 +302,7 @@ async function dispatchVehicleToMission(vehicleId, missionId) {
 
   vehicle.status = 'dispatched';
   vehicle.missionId = mission.id;
-  vehicle.speedKmh = VEHICLE_SPEEDS[vehicle.type] || 60;
+  vehicle.speedKmh = 0; // pleaca de pe loc, accelereaza progresiv pe ruta
   mission.status = 'assigned';
   delete dispatchSelections[mission.id];
 
@@ -312,8 +313,8 @@ async function dispatchVehicleToMission(vehicleId, missionId) {
   const routeCoords = await fetchOSRMRoute(vehicle.lat, vehicle.lng, mission.lat, mission.lng);
   setVehicleRoute(vehicle, routeCoords);
 
-  const eta = Math.round(etaSeconds(vehicle.routeTotalKm, vehicle.speedKmh));
-  showToast(`Traseu ${vehicle.routeTotalKm.toFixed(1)} km - sosire in ~${eta}s`, 'info');
+  const eta = simulateEtaSeconds(vehicle);
+  showToast(`Traseu ${vehicle.routeTotalKm.toFixed(1)} km - sosire in ~${formatDuration(eta)}`, 'info');
 
   saveState();
   renderUI();
@@ -400,8 +401,7 @@ async function completeMissionWork(vehicleId) {
   // Return vehicle to station
   const station = state.stations.find(s => s.id === vehicle.stationId);
   if (station) {
-    vehicle.status = 'returning';
-    vehicle.speedKmh = VEHICLE_SPEEDS[vehicle.type] || 60;
+    vehicle.status = 'returning'; // setVehicleRoute() o repune pe loc (viteza 0)
     const returnRoute = await fetchOSRMRoute(vehicle.lat, vehicle.lng, station.lat, station.lng);
     setVehicleRoute(vehicle, returnRoute);
   } else {

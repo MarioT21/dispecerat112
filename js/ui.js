@@ -188,6 +188,8 @@ function updateMissionTimers() {
 
 function startTimersLoop() {
   setInterval(updateMissionTimers, 1000);
+  // Popup-ul de vehicul (viteza / ETA) se actualizeaza in timp real cat e deschis.
+  setInterval(refreshOpenVehiclePopup, 1000);
 }
 
 // ------------------------------------------------------------------------
