@@ -54,7 +54,40 @@ let isRenderingMap = false;
 
 // (21 min real) se parcurge in ~21 secunde de joc.
 
-const SIM_SPEED_MULTIPLIER = 60;
+// Viteza simularii: 1 = TIMP REAL (distanta / viteza = timpul chiar afisat de joc).
+// Echipajul parcurge 20 km la 100 km/h in ~12 minute, exact cat ar face-o in realitate.
+// Se poate accelera din Setari (slider), dar timpii afisati raman mereu in km/h reali.
+// Nota: la valori mari (ex. x60) accelerarea/franarea se comprima cu sqrt(viteza),
+// altfel masina nu apuca sa ajunga la viteza de croaziera pe rutele scurte.
+
+const SIM_SPEED_MIN = 1;
+const SIM_SPEED_MAX = 60;
+const SIM_SPEED_DEFAULT = 1;
+
+let SIM_SPEED_MULTIPLIER = SIM_SPEED_DEFAULT;
+
+function simSpeedLabel(v) {
+  return v <= 1 ? '×1 (timp real)' : '×' + v;
+}
+
+// Aplica viteza simularii + sincronizeaza sliderul din Setari.
+
+function applySimSpeed(value) {
+  const v = Math.min(SIM_SPEED_MAX, Math.max(SIM_SPEED_MIN, Number(value) || SIM_SPEED_DEFAULT));
+  SIM_SPEED_MULTIPLIER = v;
+  state.simSpeed = v;
+  const slider = document.getElementById('input-sim-speed');
+  if (slider) slider.value = v;
+  const label = document.getElementById('slider-sim-speed-val');
+  if (label) label.textContent = simSpeedLabel(v);
+  return v;
+}
+
+function updateSimSpeedSlider(val) {
+  applySimSpeed(val);
+  saveState();
+  showToast(`Viteză simulare: ${simSpeedLabel(SIM_SPEED_MULTIPLIER)}`, 'info');
+}
 
 // Viteze medii urbane (km/h) per tip de echipaj.
 
@@ -83,27 +116,48 @@ function vehicleProfile(vehicle) {
 // Sub-pasul de integrare a fizicii (tick-urile sunt la 300 ms; 0.5 s e stabil).
 const PHYSICS_SUBSTEP_SEC = 0.5;
 
-// Cat de repede se simte accelerarea/franarea la scara jocului.
-// Simularea comprima timpul de 60x, dar acceleratia rămâne la scara de ecran:
-// 0 -> 100 km/h in ~1.2 s de joc (altfel, pe o ruta de 8 km masina nu apuca
-// sa treaca de 50 km/h si "masina de urgenta" nu se simtea deloc).
-const PHYSICS_TIME_SCALE = 8;
+// La x1 (timp real) accelerarea e cea reala (3 m/s^2, 0-100 in ~9 s).
+// Cand simularea e comprimata, accelerarea se comprima cu sqrt(viteza), nu liniar,
+// altfel pe o ruta de 8 km masina nu apuca sa treaca de 50 km/h si nu se simtea
+// deloc ca vehicul prioritar.
 
-// Acceleratia/deceleratia raportata la spatiul hartii (m/s^2 pe km de harta):
-// distantele din formula de franare anticipata sunt in metri de harta.
+function accelRateKmhPerSubsec(ms2) {
+  return ms2 * 3.6 * Math.sqrt(SIM_SPEED_MULTIPLIER); // km/h pe secunda de joc
+}
+
+// Acceleratia raportata la spatiul hartii (m/s^2 pe km de harta), pentru formula
+// de franare anticipata, unde distantele sunt in metri de harta.
+
 function spatialAccelMs2(ms2) {
-  return (ms2 * PHYSICS_TIME_SCALE) / SIM_SPEED_MULTIPLIER;
+  return ms2 / Math.sqrt(SIM_SPEED_MULTIPLIER);
 }
 
 // Cat de departe ne uitam la virajele din fata cand calculam franarea (km).
-const CORNER_LOOKAHEAD_KM = 0.8;
+// Spatiul necesar franarii creste cu viteza simularii (la x1: ~120 m de la 145 km/h).
+
+const CORNER_LOOKAHEAD_KM = 0.15;
+
+function cornerLookaheadKm() {
+  return CORNER_LOOKAHEAD_KM * Math.sqrt(SIM_SPEED_MULTIPLIER);
+}
 
 // Sub aceasta distanta de destinatie (km) incepe franarea de oprire.
-const ARRIVAL_SLOWDOWN_KM = 0.07;
+const ARRIVAL_SLOWDOWN_KM = 0.25;
 
 // Fereastra de raspuns pentru un apel 112 (secunde reale).
 
-const MISSION_TIMEOUT_SEC = 150;
+const MISSION_TIMEOUT_SEC = 240;
+
+// Cat dureaza interventia la fata locului (secunde).
+
+const MISSION_WORK_SEC = 20;
+
+// Ritmul apelurilor: un apel nou la fiecare 25 s (timp real) si plafon de
+// apeluri nedispecerizate / misiuni active simultan (la x1 o misiune tine minute).
+
+const CALL_INTERVAL_MS = 25000;
+const MAX_PENDING_CALLS = 8;
+const MAX_ACTIVE_MISSIONS = 14;
 
 // Procentul din recompensa pierdut cand un apel expira nerezolvat.
 
@@ -257,9 +311,10 @@ function vehicleTargetSpeedKmh(vehicle, distKm, segIdx) {
     const cum = vehicle.routeCum;
     if (cum) {
       const aSpatial = spatialAccelMs2(p.brake);
+      const lookaheadKm = cornerLookaheadKm();
       for (let j = i + 1; j < speeds.length; j++) {
         const dKm = cum[j] - distKm;
-        if (dKm > CORNER_LOOKAHEAD_KM) break;
+        if (dKm > lookaheadKm) break;
         // viteza maxima pe care o pot avea ACUM ca sa pot frana la timp la limita de acolo
         const vNextMs = Math.min(p.maxKmh, speeds[j] * p.urgency) / 3.6;
         const allowed = Math.sqrt(vNextMs * vNextMs + 2 * aSpatial * Math.max(0, dKm * 1000)) * 3.6;
@@ -268,8 +323,9 @@ function vehicleTargetSpeedKmh(vehicle, distKm, segIdx) {
       const total = cum[cum.length - 1];
       const leftKm = total - distKm;
       if (leftKm < ARRIVAL_SLOWDOWN_KM) {
+        // viteza maxima cu care pot ajunge la destinatie si opri exact acolo
         const vArr = Math.sqrt(Math.max(0, 2 * aSpatial * leftKm * 1000)) * 3.6;
-        target = Math.min(target, Math.max(8, vArr));
+        target = Math.min(target, vArr);
       }
     }
   }
@@ -299,7 +355,7 @@ function advanceVehicleAlongRoute(vehicle, dtSec) {
 
     const target = vehicleTargetSpeedKmh(vehicle, vehicle.distKm, vehicle.segIdx || 0);
     const dv = target - vehicle.speedKmh;
-    const rate = (dv >= 0 ? p.accel : p.brake) * 3.6 * PHYSICS_TIME_SCALE * dt; // m/s^2 -> km/h pe sub-pas
+    const rate = accelRateKmhPerSubsec(dv >= 0 ? p.accel : p.brake) * dt; // m/s^2 -> km/h pe sub-pas
     if (dv >= 0) vehicle.speedKmh = Math.min(target, vehicle.speedKmh + rate);
     else vehicle.speedKmh = Math.max(target, vehicle.speedKmh - rate);
 
@@ -344,8 +400,8 @@ function simulateEtaSeconds(vehicle, maxSeconds) {
     segIdx: vehicle.segIdx || 0,
     speedKmh: vehicle.speedKmh || 0
   };
-  // Pas de 0.1 s: ETA ramane precis si pe rute de cateva secunde.
-  const STEP = 0.1;
+  // Pas de 0.25 s: ETA precis, dar fara mii de iteratii pe rute de minute intregi.
+  const STEP = 0.25;
   let t = 0;
   while (t < limit) {
     if (advanceVehicleAlongRoute(sim, STEP)) break;
@@ -533,6 +589,7 @@ function loadSavedState() {
     try {
       const parsed = JSON.parse(saved);
       state = { ...state, ...parsed };
+      applySimSpeed(state.simSpeed); // viteza simularii salvata de jucator
     } catch (e) {
       console.error('Error loading saved state', e);
     }

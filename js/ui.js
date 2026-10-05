@@ -23,6 +23,13 @@ function renderUI() {
   document.getElementById('slider-distance-val').textContent = `${state.maxDistanceKm} km`;
   document.getElementById('toggle-coverage-circle').checked = state.showCoverageCircles;
 
+  // Viteza simularii (slider din Setari) - sincronizata cu valoarea reala.
+  const simSlider = document.getElementById('input-sim-speed');
+  if (simSlider) {
+    simSlider.value = SIM_SPEED_MULTIPLIER;
+    document.getElementById('slider-sim-speed-val').textContent = simSpeedLabel(SIM_SPEED_MULTIPLIER);
+  }
+
   renderMissionsList();
   renderStationsList();
   updateMissionTimers();

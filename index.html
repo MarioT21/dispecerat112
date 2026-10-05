@@ -249,6 +249,28 @@
           </div>
         </div>
 
+        <!-- Viteza Simularii (x1 = timp real) -->
+        <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-800 space-y-3">
+          <div class="flex justify-between items-center">
+            <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+              <i class="fa-solid fa-gauge-high text-cyan-400"></i> Viteză Simulare
+            </label>
+            <span id="slider-sim-speed-val" class="font-orbitron text-sm font-bold text-cyan-400">×1 (timp real)</span>
+          </div>
+          <p class="text-[11px] text-slate-400 leading-relaxed">
+            La <b class="text-slate-200">×1</b> echipajele se deplasează în timp real: 20 km la 100 km/h
+            durează ~12 minute, exact cât ar dura pe drum. Crește valoarea dacă vrei să treacă timpul
+            mai repede (viteza afișată rămâne cea reală, în km/h).
+          </p>
+          <input type="range" id="input-sim-speed" min="1" max="60" value="1" oninput="updateSimSpeedSlider(this.value)" class="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer">
+          <div class="flex justify-between text-[10px] text-slate-500 font-mono">
+            <span>×1 real</span>
+            <span>×15</span>
+            <span>×30</span>
+            <span>×60</span>
+          </div>
+        </div>
+
         <!-- Layer Selector Hartă -->
         <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-800 space-y-3">
           <label class="text-xs font-bold text-slate-200 uppercase tracking-wider block">

@@ -25,8 +25,9 @@ function recoverStuckVehicles() {
     }
 
     if (v.status === 'on_scene') {
-      // Timerul de interventie traia doar in memorie -> il relansam.
-      setTimeout(() => completeMissionWork(v.id), 4000);
+      // Timerul de interventie traia doar in memorie -> il relansam (mai scurt,
+      // interventia era deja in curs cand s-a dat reload).
+      setTimeout(() => completeMissionWork(v.id), 5000);
     } else if (v.status === 'dispatched' || v.status === 'returning') {
       if (v.route && v.route.length > 1) {
         // Ruta a fost persistata -> reconstruim distantele cumulative.
@@ -182,10 +183,13 @@ function confirmVehiclePurchase() {
 function startCallGeneratorTimer() {
   setInterval(() => {
     if (state.stations.length === 0) return;
-    if (state.missions.length >= 8) return; // Limit active calls
+    // La timp real un echipaj e plecat minute intregi, deci se numara doar
+    // apelurile inca nedispecerizate, plus un plafon total de siguranta.
+    const pending = state.missions.filter(m => m.status === 'active').length;
+    if (pending >= MAX_PENDING_CALLS || state.missions.length >= MAX_ACTIVE_MISSIONS) return;
 
     generateRandom112Call();
-  }, 14000); // New call every 14s
+  }, CALL_INTERVAL_MS);
 }
 
 function generateRandom112Call() {
@@ -350,7 +354,8 @@ function startGameLoop() {
         if (atEnd) {
           if (vehicle.status === 'dispatched') {
             vehicle.status = 'on_scene';
-            setTimeout(() => completeMissionWork(vehicle.id), 8000);
+            // Interventia la fata locului (secunde reale).
+            setTimeout(() => completeMissionWork(vehicle.id), MISSION_WORK_SEC * 1000);
           } else if (vehicle.status === 'returning') {
             vehicle.status = 'idle';
             vehicle.route = [];
