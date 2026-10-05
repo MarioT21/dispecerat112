@@ -336,6 +336,7 @@ function vehiclePopupHtml(vehicle) {
   const rows = moving ? `
       <div class="flex justify-between gap-3"><span class="text-slate-400">Viteză curentă</span><b class="font-orbitron text-cyan-300">${speed} km/h</b></div>
       <div class="flex justify-between gap-3"><span class="text-slate-400">Limită drum (est.)</span><b class="font-orbitron text-amber-300">${roadLimit} km/h</b></div>
+      <div class="text-right text-[10px] text-slate-500 -mt-1">${roadLimit ? roadKindLabel(roadLimit) : ''}</div>
       <div class="flex justify-between gap-3"><span class="text-slate-400">Distanță rămasă</span><b class="font-orbitron text-slate-200">${leftKm.toFixed(1)} / ${totalKm.toFixed(1)} km</b></div>
       <div class="flex justify-between gap-3"><span class="text-slate-400">Timp estimat</span><b class="font-orbitron text-emerald-300">${formatDuration(eta)}</b></div>
       <div class="mt-1 h-1.5 rounded bg-slate-800 overflow-hidden"><div class="h-full bg-cyan-400" style="width:${pct}%"></div></div>` : `

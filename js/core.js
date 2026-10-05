@@ -156,21 +156,54 @@ function roadSpeedFromAngle(deg) {
   return 22;                 // viraj strans / manevra in intersectie
 }
 
-// Limita de viteza estimata pentru fiecare segment al rutei.
-// Segmentul primeste limita nodului de la inceputul lui; franarea anticipata
+// Limita de drum estimata din densitatea nodurilor: strazile urbane au intersectii
+// dese (noduri OSM la 20-100 m), drumurile judetene/nationale au noduri rare.
+
+function roadSpeedFromSpacing(avgM) {
+  if (avgM < 60) return 50;   // strada urbana cu intersectii dese
+  if (avgM < 150) return 60;
+  if (avgM < 300) return 80;
+  return 100;                 // drum national / autostrada
+}
+
+// Eticheta orientativa pentru limita estimata (afisata in popup).
+
+function roadKindLabel(limitKmh) {
+  if (limitKmh <= 55) return 'zonă urbană';
+  if (limitKmh <= 70) return 'drum județean / suburbie';
+  if (limitKmh <= 85) return 'drum județean';
+  return 'drum național / autostradă';
+}
+
+// Limita de viteza estimata pentru fiecare segment al rutei, din doua surse
+// (OSRM public nu trimite maxspeed):
+//   1. unghiul virajului de la inceputul segmentului - curbe stranse = limita mica;
+//   2. densitatea nodurilor din jur - intersectii dese = zona urbana.
+// Segmentul primeste limita nodului de la inceputul lui, iar franarea anticipata
 // din vehicleTargetSpeedKmh() se ocupa de incetinirea INAINTE de viraj.
 
 function estimateSegmentSpeeds(route) {
   const n = route ? route.length : 0;
   if (n < 2) return [];
-  const nodeLimit = new Array(n).fill(110);
-  for (let i = 1; i < n - 1; i++) {
-    nodeLimit[i] = roadSpeedFromAngle(
-      turnAngleDeg(route[i - 1][0], route[i - 1][1], route[i][0], route[i][1], route[i + 1][0], route[i + 1][1])
-    );
+
+  const segKm = new Array(n - 1);
+  for (let j = 0; j < n - 1; j++) {
+    segKm[j] = haversineKm(route[j][0], route[j][1], route[j + 1][0], route[j + 1][1]);
   }
+
   const speeds = new Array(n - 1);
-  for (let j = 0; j < n - 1; j++) speeds[j] = nodeLimit[j];
+  for (let j = 0; j < n - 1; j++) {
+    let byAngle = 110;
+    if (j >= 1 && j <= n - 2) {
+      byAngle = roadSpeedFromAngle(
+        turnAngleDeg(route[j - 1][0], route[j - 1][1], route[j][0], route[j][1], route[j + 1][0], route[j + 1][1])
+      );
+    }
+    let sum = 0, cnt = 0;
+    for (let k = Math.max(0, j - 2); k <= Math.min(n - 2, j + 2); k++) { sum += segKm[k]; cnt++; }
+    const bySpacing = roadSpeedFromSpacing((sum / Math.max(1, cnt)) * 1000);
+    speeds[j] = Math.min(byAngle, bySpacing);
+  }
   return speeds;
 }
 
