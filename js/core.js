@@ -104,9 +104,9 @@ const VEHICLE_SPEEDS = { police: 70, smurd: 65, fire_custom: 50 };
 // Cat poate depasi limita drumului (regim prioritar) e in OVERTAKE_KMH.
 
 const VEHICLE_PROFILES = {
-  police:      { maxKmh: 145, accel: 3.0, brake: 7.0 },
-  smurd:       { maxKmh: 125, accel: 2.4, brake: 6.0 },
-  fire_custom: { maxKmh: 95,  accel: 1.5, brake: 4.5 }
+  police:      { maxKmh: 150, accel: 3.0, brake: 7.0 },
+  smurd:       { maxKmh: 130, accel: 2.4, brake: 6.0 },
+  fire_custom: { maxKmh: 100, accel: 1.5, brake: 4.5 }
 };
 
 function vehicleProfile(vehicle) {
@@ -203,17 +203,17 @@ function turnAngleDeg(lat1, lng1, lat2, lng2, lat3, lng3) {
 // Depasirea e absoluta, nu procentuala: pe o strada de 50 se merge cu ~70-90,
 // pe un drum de 100 cu ~125-145. Ca in realitate, nu o limita fixa pusa la toate.
 
-const OVERTAKE_KMH = { police: 30, smurd: 25, fire_custom: 15 };
+const OVERTAKE_KMH = { police: 38, smurd: 32, fire_custom: 20 };
 
 // Limita FIZICA de viraj (nu se depaseste). null = drum drept, fara restrictie.
 
 function cornerLimitFromAngle(deg) {
   if (deg < 6) return null;   // drept
-  if (deg < 15) return 85;
-  if (deg < 30) return 60;
-  if (deg < 50) return 45;
-  if (deg < 75) return 32;
-  return 22;                  // viraj strans / manevra in intersectie
+  if (deg < 15) return 95;
+  if (deg < 30) return 75;
+  if (deg < 50) return 58;
+  if (deg < 75) return 42;
+  return 28;                  // viraj strans / manevra in intersectie
 }
 
 // Sub aceasta valoare limita de drum nu conteaza: se foloseste 50 (cerut explicit).
@@ -288,7 +288,7 @@ function buildSegmentProfile(route, flowKmh) {
     let sumA = 0, cntA = 0, dist = 0;
     for (let k = j + 1; k <= n - 2 && dist < 0.7; k++) { sumA += angle[k]; cntA++; dist += segKm[k]; }
     const avgAngle = cntA ? sumA / cntA : 0;
-    straight[j] = avgAngle < 3 ? 1.20 : avgAngle < 7 ? 1.12 : avgAngle < 14 ? 1.05 : 1.00;
+    straight[j] = avgAngle < 3 ? 1.20 : avgAngle < 7 ? 1.14 : avgAngle < 14 ? 1.07 : 1.00;
   }
 
   return { speeds: speeds, corner: corner, straight: straight };
@@ -306,8 +306,9 @@ function estimateSegmentSpeeds(route, flowKmh) {
 function driverSpeedFactor(vehicle, distKm) {
   const d = distKm != null ? distKm : (vehicle.distKm || 0);
   const s = vehicle.driverSeed || 0;
-  // 0.72 (sofer prudent / drum aglomerat) .. 1.10 (sofer presat), variaza pe parcurs
-  return 0.91 + Math.sin(d * 1.9 + s) * 0.13 + Math.sin(d * 0.61 + s * 2.1) * 0.06;
+  // 0.50 (sofer prudent / trafic) .. 1.06 (sofer presat): variaza mult pe parcurs,
+  // ca viteza sa nu para fixa pe toata ruta
+  return 0.78 + Math.sin(d * 1.9 + s) * 0.19 + Math.sin(d * 0.61 + s * 2.1) * 0.09;
 }
 
 // Punct aleator distribuit uniform in discul de raza radiusKm
