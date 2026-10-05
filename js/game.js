@@ -36,7 +36,7 @@ function recoverStuckVehicles() {
         v.routeTotalKm = metrics.totalKm;
         // Salvarile vechi nu au profilul de drum -> il reconstruim (fara viteze reale).
         if (!v.routeSpeeds || v.routeSpeeds.length !== v.route.length - 1) {
-          const prof = buildSegmentProfile(v.route, null);
+          const prof = buildSegmentProfile(v.route, null, null);
           v.routeSpeeds = prof.speeds;
           v.routeCorner = prof.corner;
           v.routeStraight = prof.straight;
@@ -277,7 +277,7 @@ const ROUTE_PROVIDERS = [
 async function fetchRouteWithSpeeds(startLat, startLng, endLat, endLng) {
   for (let i = 0; i < ROUTE_PROVIDERS.length; i++) {
     try {
-      const url = `${ROUTE_PROVIDERS[i]}/${startLng},${startLat};${endLng},${endLat}?overview=full&geometries=geojson&annotations=speed`;
+      const url = `${ROUTE_PROVIDERS[i]}/${startLng},${startLat};${endLng},${endLat}?overview=full&geometries=geojson&annotations=speed&steps=true`;
       const res = await fetch(url);
       const data = await res.json();
 
@@ -289,7 +289,13 @@ async function fetchRouteWithSpeeds(startLat, startLng, endLat, endLng) {
         const raw = ann.speed;
         // speed e in m/s, cate un element per segment de geometrie
         const flowKmh = (raw && raw.length === coords.length - 1) ? raw.map(v => v * 3.6) : null;
-        if (coords.length > 1) return { coords: coords, flowKmh: flowKmh };
+
+        // Clasa reala a drumului (ref DN/DJ/A + densitatea intersectiilor), per bucata.
+        const allSteps = [];
+        (route.legs || []).forEach(leg => (leg.steps || []).forEach(st => allSteps.push(st)));
+        const roadRanges = buildRoadRanges(allSteps);
+
+        if (coords.length > 1) return { coords: coords, flowKmh: flowKmh, roadRanges: roadRanges };
       }
     } catch (e) {
       console.warn('Rutare esuata pe', ROUTE_PROVIDERS[i], e);
@@ -306,7 +312,7 @@ async function fetchRouteWithSpeeds(startLat, startLng, endLat, endLng) {
       startLng + (endLng - startLng) * t
     ]);
   }
-  return { coords: points, flowKmh: null };
+  return { coords: points, flowKmh: null, roadRanges: [] };
 }
 
 async function dispatchVehicleToMission(vehicleId, missionId) {
@@ -340,7 +346,7 @@ async function dispatchVehicleToMission(vehicleId, missionId) {
 
   // Ruta rutiera reala + vitezele reale de drum (FOSSGIS/OSM).
   const routed = await fetchRouteWithSpeeds(vehicle.lat, vehicle.lng, mission.lat, mission.lng);
-  setVehicleRoute(vehicle, routed.coords, routed.flowKmh);
+  setVehicleRoute(vehicle, routed.coords, routed.flowKmh, routed.roadRanges);
 
   const eta = simulateEtaSeconds(vehicle);
   showToast(`Traseu ${vehicle.routeTotalKm.toFixed(1)} km${vehicle.roadDataReal ? ' (limite reale de drum)' : ''} - sosire in ~${formatDuration(eta)}`, 'info');
@@ -433,7 +439,7 @@ async function completeMissionWork(vehicleId) {
   if (station) {
     vehicle.status = 'returning'; // setVehicleRoute() o repune pe loc (viteza 0)
     const routedBack = await fetchRouteWithSpeeds(vehicle.lat, vehicle.lng, station.lat, station.lng);
-    setVehicleRoute(vehicle, routedBack.coords, routedBack.flowKmh);
+    setVehicleRoute(vehicle, routedBack.coords, routedBack.flowKmh, routedBack.roadRanges);
   } else {
     vehicle.status = 'idle';
     vehicle.missionId = null;

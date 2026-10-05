@@ -243,13 +243,94 @@ function roadSpeedFromSpacing(avgM) {
   return 100;                 // drum national / autostrada
 }
 
-// Eticheta orientativa pentru limita estimata (afisata in popup).
+// Eticheta orientativa pentru limita estimata (folosita cand nu stim clasa reala).
 
 function roadKindLabel(limitKmh) {
   if (limitKmh <= 55) return 'zonă urbană';
   if (limitKmh <= 70) return 'drum județean / suburbie';
   if (limitKmh <= 85) return 'drum județean';
   return 'drum național / autostradă';
+}
+
+// ------------------------------------------------------------------------
+// CLASA REALA A DRUMULUI (din OSRM steps: ref + numarul de intersectii)
+// ------------------------------------------------------------------------
+// `steps[].ref` da numarul drumului ("DN1", "DJ101", "A3"), iar `intersections`
+// arata cat de des sunt intersectii (oras vs. drum deschis). Fara asta, o ruta
+// iesita din oras pe un drum judetean aparea tot "zona urbana / 50 km/h",
+// pentru ca datele OSM de limita de viteza sunt slabe in Romania.
+
+const ROAD_CLASS_BASE_KMH = { motorway: 130, trunk: 110, national: 100, county: 90 };
+
+const ROAD_CLASS_LABEL = {
+  motorway: 'autostradă',
+  trunk: 'drum european',
+  national: 'drum național',
+  county: 'drum județean'
+};
+
+// "DN1; DN1A; DN7" -> national; "A3" -> motorway; "DJ101" -> county.
+
+function roadClassFromRef(ref) {
+  if (!ref) return null;
+  const first = String(ref).split(';')[0].trim().toUpperCase().replace(/\s+/g, '');
+  if (/^A\d/.test(first)) return 'motorway';
+  if (/^DN\d/.test(first)) return 'national';
+  if (/^DJ\d/.test(first)) return 'county';
+  if (/^E\d/.test(first)) return 'trunk';
+  return null;
+}
+
+// Un pas de drum e urban daca are intersectii dese.
+
+function stepLooksUrban(step) {
+  const distKm = (step.distance || 0) / 1000;
+  if (distKm <= 0.05) return true;
+  const intersections = (step.intersections || []).length;
+  return intersections / distKm > 6;
+}
+
+// Distantele cumulative ale steps-urilor, ca sa stim ce clasa de drum e la fiecare km.
+
+function buildRoadRanges(steps) {
+  const ranges = [];
+  let acc = 0;
+  (steps || []).forEach(step => {
+    const dKm = (step.distance || 0) / 1000;
+    if (dKm <= 0) return;
+    ranges.push({
+      from: acc,
+      to: acc + dKm,
+      cls: roadClassFromRef(step.ref),
+      urban: stepLooksUrban(step),
+      ref: step.ref || null
+    });
+    acc += dKm;
+  });
+  return ranges;
+}
+
+// Ce clasa de drum e la distanta dKm (ranges scalate la lungimea reala a rutei).
+
+function roadInfoAt(ranges, dKm, totalKm) {
+  if (!ranges || !ranges.length) return null;
+  const scale = totalKm / Math.max(ranges[ranges.length - 1].to, 0.001);
+  const d = dKm / scale;
+  for (let i = 0; i < ranges.length; i++) {
+    if (d <= ranges[i].to) return ranges[i];
+  }
+  return ranges[ranges.length - 1];
+}
+
+// Eticheta afisata in popup: clasa reala daca o stim, altfel estimarea din limita.
+
+function roadLabelFor(vehicle, idx, roadLimit) {
+  const info = vehicle.routeRoadInfo && vehicle.routeRoadInfo[idx];
+  if (info && info.cls && !info.urban) {
+    return ROAD_CLASS_LABEL[info.cls] + (info.ref ? ' (' + info.ref + ')' : '');
+  }
+  if (info && info.urban) return 'zonă urbană';
+  return roadKindLabel(roadLimit);
 }
 
 // Limita de viteza estimata pentru fiecare segment al rutei, din doua surse
@@ -259,9 +340,9 @@ function roadKindLabel(limitKmh) {
 // Segmentul primeste limita nodului de la inceputul lui, iar franarea anticipata
 // din vehicleTargetSpeedKmh() se ocupa de incetinirea INAINTE de viraj.
 
-function buildSegmentProfile(route, flowKmh) {
+function buildSegmentProfile(route, flowKmh, roadRanges) {
   const n = route ? route.length : 0;
-  if (n < 2) return { speeds: [], corner: [], straight: [] };
+  if (n < 2) return { speeds: [], corner: [], straight: [], roadInfo: [] };
 
   const segKm = new Array(n - 1);
   for (let j = 0; j < n - 1; j++) {
@@ -278,12 +359,17 @@ function buildSegmentProfile(route, flowKmh) {
 
   // Vitezele reale vin per segment (FOSSGIS OSRM -> annotation.speed).
   const hasFlow = !!(flowKmh && flowKmh.length === n - 1);
+  const totalKm = segKm.reduce((a, b) => a + b, 0);
 
   const speeds = new Array(n - 1);
   const corner = new Array(n - 1);
   const straight = new Array(n - 1);
+  const roadInfo = new Array(n - 1);
 
+  let cumKm = 0;
   for (let j = 0; j < n - 1; j++) {
+    cumKm += segKm[j];
+
     let roadLimit;
     if (hasFlow && flowKmh[j] != null) {
       // viteza reala de circulatie pe acel segment (date OSM)
@@ -293,24 +379,33 @@ function buildSegmentProfile(route, flowKmh) {
       for (let k = Math.max(0, j - 2); k <= Math.min(n - 2, j + 2); k++) { sum += segKm[k]; cnt++; }
       roadLimit = Math.max(ROAD_MIN_KMH, roadSpeedFromSpacing((sum / Math.max(1, cnt)) * 1000));
     }
+
+    // Clasa reala a drumului: in afara localitatii, un DN/DJ/autostrada are limita
+    // mai mare decat da OSM (care pune des 50 km/h si pe drumurile judetene).
+    const info = roadInfoAt(roadRanges, cumKm, totalKm);
+    roadInfo[j] = info;
+    if (info && info.cls && !info.urban) {
+      const base = ROAD_CLASS_BASE_KMH[info.cls] || 0;
+      if (base > roadLimit) roadLimit = base;
+    }
+
     speeds[j] = roadLimit;
     corner[j] = (j >= 1 && j <= n - 2) ? cornerLimitFromAngle(angle[j]) : null;
 
-    // Cat de drept e drumul pe urmatorii ~700 m: 1.00 = sinuos, 1.20 = drept.
-    // Pe un sector drept masina poate merge vizibil mai tare decat intr-un viraj.
+    // Cat de drept e drumul pe urmatorii ~700 m: 1.00 = sinuos, 1.32 = foarte drept.
     let sumA = 0, cntA = 0, dist = 0;
     for (let k = j + 1; k <= n - 2 && dist < 0.7; k++) { sumA += angle[k]; cntA++; dist += segKm[k]; }
     const avgAngle = cntA ? sumA / cntA : 0;
     straight[j] = avgAngle < 1.5 ? 1.32 : avgAngle < 3 ? 1.22 : avgAngle < 7 ? 1.12 : avgAngle < 14 ? 1.05 : 1.00;
   }
 
-  return { speeds: speeds, corner: corner, straight: straight };
+  return { speeds: speeds, corner: corner, straight: straight, roadInfo: roadInfo };
 }
 
 // Limita de drum per segment (fara plafonul fizic de viraj).
 
-function estimateSegmentSpeeds(route, flowKmh) {
-  return buildSegmentProfile(route, flowKmh).speeds;
+function estimateSegmentSpeeds(route, flowKmh, roadRanges) {
+  return buildSegmentProfile(route, flowKmh, roadRanges).speeds;
 }
 
 // Stilul soferului: variaza lent pe parcurs (0.82 .. 1.06), ca viteza sa nu fie
@@ -522,16 +617,17 @@ function formatDuration(sec) {
 
 // Seteaza ruta + metricile de distanta, resetand progresul.
 
-function setVehicleRoute(vehicle, route, flowKmh) {
+function setVehicleRoute(vehicle, route, flowKmh, roadRanges) {
   vehicle.route = route;
   const m = buildRouteMetrics(route);
   vehicle.routeCum = m.cum;
   vehicle.routeTotalKm = m.totalKm;
   // flowKmh = vitezele reale per segment (FOSSGIS OSRM); lipsa -> estimare geometrica.
-  const profile = buildSegmentProfile(route, flowKmh);
+  const profile = buildSegmentProfile(route, flowKmh, roadRanges);
   vehicle.routeSpeeds = profile.speeds;
   vehicle.routeCorner = profile.corner;
   vehicle.routeStraight = profile.straight;
+  vehicle.routeRoadInfo = profile.roadInfo;
   vehicle.roadDataReal = !!(flowKmh && flowKmh.length === route.length - 1);
   if (vehicle.driverSeed == null) vehicle.driverSeed = Math.random() * Math.PI * 2;
   vehicle.distKm = 0;
