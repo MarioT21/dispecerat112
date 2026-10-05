@@ -98,15 +98,15 @@ const VEHICLE_SPEEDS = { police: 70, smurd: 65, fire_custom: 50 };
 // in curbe si inainte de viraje. Limita de drum e estimata din geometria rutei
 // (OSRM public nu trimite maxspeed), iar regimul de urgenta permite depasirea ei.
 // Profil per tip de echipaj:
-//   maxKmh  - plafonul absolut al vehiculului
-//   accel   - acceleratie in m/s^2
-//   brake   - deceleratie in m/s^2 la franare
-//   urgency - cat de mult poate depasi limita drumului (regim prioritar)
+//   maxKmh - plafonul absolut al vehiculului
+//   accel  - acceleratie in m/s^2
+//   brake  - deceleratie in m/s^2 la franare
+// Cat poate depasi limita drumului (regim prioritar) e in OVERTAKE_KMH.
 
 const VEHICLE_PROFILES = {
-  police:      { maxKmh: 145, accel: 3.0, brake: 7.0, urgency: 1.45 },
-  smurd:       { maxKmh: 125, accel: 2.4, brake: 6.0, urgency: 1.35 },
-  fire_custom: { maxKmh: 95,  accel: 1.5, brake: 4.5, urgency: 1.20 }
+  police:      { maxKmh: 145, accel: 3.0, brake: 7.0 },
+  smurd:       { maxKmh: 125, accel: 2.4, brake: 6.0 },
+  fire_custom: { maxKmh: 95,  accel: 1.5, brake: 4.5 }
 };
 
 function vehicleProfile(vehicle) {
@@ -199,19 +199,29 @@ function turnAngleDeg(lat1, lng1, lat2, lng2, lat3, lng3) {
   return Math.abs(((d + 540) % 360) - 180);
 }
 
-// Limita de drum (km/h) estimata din unghiul virajului.
+// Cat de mult peste limita drumului poate merge fiecare tip de echipaj (km/h).
+// Depasirea e absoluta, nu procentuala: pe o strada de 50 se merge cu ~70-90,
+// pe un drum de 100 cu ~125-145. Ca in realitate, nu o limita fixa pusa la toate.
 
-function roadSpeedFromAngle(deg) {
-  if (deg < 6) return 110;   // drum drept (DN / european)
+const OVERTAKE_KMH = { police: 30, smurd: 25, fire_custom: 15 };
+
+// Limita FIZICA de viraj (nu se depaseste). null = drum drept, fara restrictie.
+
+function cornerLimitFromAngle(deg) {
+  if (deg < 6) return null;   // drept
   if (deg < 15) return 85;
   if (deg < 30) return 60;
   if (deg < 50) return 45;
   if (deg < 75) return 32;
-  return 22;                 // viraj strans / manevra in intersectie
+  return 22;                  // viraj strans / manevra in intersectie
 }
 
-// Limita de drum estimata din densitatea nodurilor: strazile urbane au intersectii
-// dese (noduri OSM la 20-100 m), drumurile judetene/nationale au noduri rare.
+// Sub aceasta valoare limita de drum nu conteaza: se foloseste 50 (cerut explicit).
+const ROAD_MIN_KMH = 50;
+
+// Limita de drum estimata din densitatea nodurilor (folosita DOAR cand nu avem
+// vitezele reale de pe ruta): strazile urbane au intersectii dese (noduri la
+// 20-100 m), drumurile judetene/nationale au noduri rare.
 
 function roadSpeedFromSpacing(avgM) {
   if (avgM < 60) return 50;   // strada urbana cu intersectii dese
@@ -236,29 +246,68 @@ function roadKindLabel(limitKmh) {
 // Segmentul primeste limita nodului de la inceputul lui, iar franarea anticipata
 // din vehicleTargetSpeedKmh() se ocupa de incetinirea INAINTE de viraj.
 
-function estimateSegmentSpeeds(route) {
+function buildSegmentProfile(route, flowKmh) {
   const n = route ? route.length : 0;
-  if (n < 2) return [];
+  if (n < 2) return { speeds: [], corner: [], straight: [] };
 
   const segKm = new Array(n - 1);
   for (let j = 0; j < n - 1; j++) {
     segKm[j] = haversineKm(route[j][0], route[j][1], route[j + 1][0], route[j + 1][1]);
   }
 
-  const speeds = new Array(n - 1);
-  for (let j = 0; j < n - 1; j++) {
-    let byAngle = 110;
-    if (j >= 1 && j <= n - 2) {
-      byAngle = roadSpeedFromAngle(
-        turnAngleDeg(route[j - 1][0], route[j - 1][1], route[j][0], route[j][1], route[j + 1][0], route[j + 1][1])
-      );
-    }
-    let sum = 0, cnt = 0;
-    for (let k = Math.max(0, j - 2); k <= Math.min(n - 2, j + 2); k++) { sum += segKm[k]; cnt++; }
-    const bySpacing = roadSpeedFromSpacing((sum / Math.max(1, cnt)) * 1000);
-    speeds[j] = Math.min(byAngle, bySpacing);
+  // Unghiul de schimbare de directie la fiecare nod.
+  const angle = new Array(n).fill(0);
+  for (let i = 1; i < n - 1; i++) {
+    angle[i] = turnAngleDeg(
+      route[i - 1][0], route[i - 1][1], route[i][0], route[i][1], route[i + 1][0], route[i + 1][1]
+    );
   }
-  return speeds;
+
+  // Vitezele reale vin per segment (FOSSGIS OSRM -> annotation.speed).
+  const hasFlow = !!(flowKmh && flowKmh.length === n - 1);
+
+  const speeds = new Array(n - 1);
+  const corner = new Array(n - 1);
+  const straight = new Array(n - 1);
+
+  for (let j = 0; j < n - 1; j++) {
+    let roadLimit;
+    if (hasFlow && flowKmh[j] != null) {
+      // viteza reala de circulatie pe acel segment (date OSM)
+      roadLimit = Math.max(ROAD_MIN_KMH, flowKmh[j]);
+    } else {
+      let sum = 0, cnt = 0;
+      for (let k = Math.max(0, j - 2); k <= Math.min(n - 2, j + 2); k++) { sum += segKm[k]; cnt++; }
+      roadLimit = Math.max(ROAD_MIN_KMH, roadSpeedFromSpacing((sum / Math.max(1, cnt)) * 1000));
+    }
+    speeds[j] = roadLimit;
+    corner[j] = (j >= 1 && j <= n - 2) ? cornerLimitFromAngle(angle[j]) : null;
+
+    // Cat de drept e drumul pe urmatorii ~700 m: 1.00 = sinuos, 1.20 = drept.
+    // Pe un sector drept masina poate merge vizibil mai tare decat intr-un viraj.
+    let sumA = 0, cntA = 0, dist = 0;
+    for (let k = j + 1; k <= n - 2 && dist < 0.7; k++) { sumA += angle[k]; cntA++; dist += segKm[k]; }
+    const avgAngle = cntA ? sumA / cntA : 0;
+    straight[j] = avgAngle < 3 ? 1.20 : avgAngle < 7 ? 1.12 : avgAngle < 14 ? 1.05 : 1.00;
+  }
+
+  return { speeds: speeds, corner: corner, straight: straight };
+}
+
+// Limita de drum per segment (fara plafonul fizic de viraj).
+
+function estimateSegmentSpeeds(route, flowKmh) {
+  return buildSegmentProfile(route, flowKmh).speeds;
+}
+
+// Stilul soferului: variaza lent pe parcurs (0.82 .. 1.06), ca viteza sa nu fie
+// fixa pe toata ruta. Deterministic (pe distanta parcursa), deci curat, fara
+// salturi de la un tick la altul.
+function driverSpeedFactor(vehicle, distKm) {
+  const d = distKm != null ? distKm : (vehicle.distKm || 0);
+  const s = vehicle.driverSeed || 0;
+  // 0.72 (sofer prudent / drum aglomerat) .. 1.10 (sofer presat), variaza pe parcurs
+  return 0.91 + Math.sin(d * 1.9 + s) * 0.13 + Math.sin(d * 0.61 + s * 2.1) * 0.06;
 }
 
 // Punct aleator distribuit uniform in discul de raza radiusKm
@@ -305,8 +354,22 @@ function vehicleTargetSpeedKmh(vehicle, distKm, segIdx) {
   let target = p.maxKmh;
   if (speeds && speeds.length) {
     const i = Math.min(Math.max(segIdx | 0, 0), speeds.length - 1);
-    const here = speeds[i] == null ? 60 : speeds[i];
-    target = Math.min(p.maxKmh, here * p.urgency);
+    const here = speeds[i] == null ? ROAD_MIN_KMH : speeds[i];
+    // Viteza tinta = limita reala a drumului + depasire de urgenta, modulata de
+    // stilul soferului si de cat de drept e sectorul. Nu e o limita fixa.
+    const dyn = driverSpeedFactor(vehicle, distKm) *
+                (vehicle.routeStraight && vehicle.routeStraight[i] != null ? vehicle.routeStraight[i] : 1);
+    const overtake = OVERTAKE_KMH[vehicle.type] || 25;
+
+    // Tinta pe un segment oarecare, cu acelasi model (folosita si la franarea anticipata).
+    const segTarget = (idx) => {
+      let t = Math.min(p.maxKmh, (speeds[idx] == null ? ROAD_MIN_KMH : speeds[idx]) + overtake * dyn);
+      const cor = vehicle.routeCorner && vehicle.routeCorner[idx];
+      if (cor != null && cor < t) t = cor;
+      return t;
+    };
+
+    target = segTarget(i);
 
     const cum = vehicle.routeCum;
     if (cum) {
@@ -315,8 +378,8 @@ function vehicleTargetSpeedKmh(vehicle, distKm, segIdx) {
       for (let j = i + 1; j < speeds.length; j++) {
         const dKm = cum[j] - distKm;
         if (dKm > lookaheadKm) break;
-        // viteza maxima pe care o pot avea ACUM ca sa pot frana la timp la limita de acolo
-        const vNextMs = Math.min(p.maxKmh, speeds[j] * p.urgency) / 3.6;
+        // viteza maxima pe care o pot avea ACUM ca sa pot frana la timp la tinta de acolo
+        const vNextMs = segTarget(j) / 3.6;
         const allowed = Math.sqrt(vNextMs * vNextMs + 2 * aSpatial * Math.max(0, dKm * 1000)) * 3.6;
         if (allowed < target) target = allowed;
       }
@@ -391,11 +454,16 @@ function simulateEtaSeconds(vehicle, maxSeconds) {
   const cum = vehicle && vehicle.routeCum;
   if (!route || route.length < 2 || !cum || cum.length < 2) return 0;
   const limit = maxSeconds || 7200;
+  // Copie completa: daca lipseste ceva (stilul soferului, bonusul de sector drept,
+  // limitele de viraj), ETA-ul nu mai corespunde miscarii reale.
   const sim = {
     type: vehicle.type,
     route: route,
     routeCum: cum,
     routeSpeeds: vehicle.routeSpeeds,
+    routeCorner: vehicle.routeCorner,
+    routeStraight: vehicle.routeStraight,
+    driverSeed: vehicle.driverSeed,
     distKm: vehicle.distKm || 0,
     segIdx: vehicle.segIdx || 0,
     speedKmh: vehicle.speedKmh || 0
@@ -419,12 +487,18 @@ function formatDuration(sec) {
 
 // Seteaza ruta + metricile de distanta, resetand progresul.
 
-function setVehicleRoute(vehicle, route) {
+function setVehicleRoute(vehicle, route, flowKmh) {
   vehicle.route = route;
   const m = buildRouteMetrics(route);
   vehicle.routeCum = m.cum;
   vehicle.routeTotalKm = m.totalKm;
-  vehicle.routeSpeeds = estimateSegmentSpeeds(route);
+  // flowKmh = vitezele reale per segment (FOSSGIS OSRM); lipsa -> estimare geometrica.
+  const profile = buildSegmentProfile(route, flowKmh);
+  vehicle.routeSpeeds = profile.speeds;
+  vehicle.routeCorner = profile.corner;
+  vehicle.routeStraight = profile.straight;
+  vehicle.roadDataReal = !!(flowKmh && flowKmh.length === route.length - 1);
+  if (vehicle.driverSeed == null) vehicle.driverSeed = Math.random() * Math.PI * 2;
   vehicle.distKm = 0;
   vehicle.segIdx = 0;
   vehicle.routeIdx = 0;

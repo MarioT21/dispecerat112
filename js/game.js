@@ -34,7 +34,14 @@ function recoverStuckVehicles() {
         const metrics = buildRouteMetrics(v.route);
         v.routeCum = metrics.cum;
         v.routeTotalKm = metrics.totalKm;
-        v.routeSpeeds = estimateSegmentSpeeds(v.route); // si pentru salvarile vechi
+        // Salvarile vechi nu au profilul de drum -> il reconstruim (fara viteze reale).
+        if (!v.routeSpeeds || v.routeSpeeds.length !== v.route.length - 1) {
+          const prof = buildSegmentProfile(v.route, null);
+          v.routeSpeeds = prof.speeds;
+          v.routeCorner = prof.corner;
+          v.routeStraight = prof.straight;
+        }
+        if (v.driverSeed == null) v.driverSeed = Math.random() * Math.PI * 2;
         v.distKm = v.distKm || 0;
         v.segIdx = v.segIdx || 0;
         advanceVehicleAlongRoute(v, 0);
@@ -257,21 +264,39 @@ function generateRandom112Call() {
 // OSRM ROAD ROUTING ENGINE & DISPATCH
 // ------------------------------------------------------------------------
 
-async function fetchOSRMRoute(startLat, startLng, endLat, endLng) {
-  try {
-    const url = `https://router.project-osrm.org/route/v1/driving/${startLng},${startLat};${endLng},${endLat}?overview=full&geometries=geojson`;
-    const res = await fetch(url);
-    const data = await res.json();
+// Rutare + viteze reale de drum. FOSSGIS (routing.openstreetmap.de) intoarce
+// annotation.speed per segment - viteza de parcurs din datele OSM. O folosim ca
+// limita reala a drumului; daca serverul nu raspunde, cade pe OSRM demo (fara
+// viteze, doar geometrie -> limita se estimeaza din geometrie).
 
-    if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
-      // OSRM returns [lng, lat], map to Leaflet [lat, lng]
-      return data.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+const ROUTE_PROVIDERS = [
+  'https://routing.openstreetmap.de/routed-car/route/v1/driving',
+  'https://router.project-osrm.org/route/v1/driving'
+];
+
+async function fetchRouteWithSpeeds(startLat, startLng, endLat, endLng) {
+  for (let i = 0; i < ROUTE_PROVIDERS.length; i++) {
+    try {
+      const url = `${ROUTE_PROVIDERS[i]}/${startLng},${startLat};${endLng},${endLat}?overview=full&geometries=geojson&annotations=speed`;
+      const res = await fetch(url);
+      const data = await res.json();
+
+      if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
+        const route = data.routes[0];
+        // OSRM intoarce [lng, lat]; Leaflet vrea [lat, lng]
+        const coords = route.geometry.coordinates.map(c => [c[1], c[0]]);
+        const ann = (route.legs && route.legs[0] && route.legs[0].annotation) || route.annotations || {};
+        const raw = ann.speed;
+        // speed e in m/s, cate un element per segment de geometrie
+        const flowKmh = (raw && raw.length === coords.length - 1) ? raw.map(v => v * 3.6) : null;
+        if (coords.length > 1) return { coords: coords, flowKmh: flowKmh };
+      }
+    } catch (e) {
+      console.warn('Rutare esuata pe', ROUTE_PROVIDERS[i], e);
     }
-  } catch (e) {
-    console.warn('OSRM Route fallback used', e);
   }
 
-  // Linear fallback
+  // Fallback liniar (offline)
   const points = [];
   const steps = 25;
   for (let i = 0; i <= steps; i++) {
@@ -281,7 +306,7 @@ async function fetchOSRMRoute(startLat, startLng, endLat, endLng) {
       startLng + (endLng - startLng) * t
     ]);
   }
-  return points;
+  return { coords: points, flowKmh: null };
 }
 
 async function dispatchVehicleToMission(vehicleId, missionId) {
@@ -313,12 +338,12 @@ async function dispatchVehicleToMission(vehicleId, missionId) {
   AudioEngine.playSirenTone();
   showToast(`Echipajul "${vehicle.name}" trimis la interventie!`, 'info');
 
-  // Ruta rutiera reala, apoi metrici de distanta pentru viteza constanta in km/h.
-  const routeCoords = await fetchOSRMRoute(vehicle.lat, vehicle.lng, mission.lat, mission.lng);
-  setVehicleRoute(vehicle, routeCoords);
+  // Ruta rutiera reala + vitezele reale de drum (FOSSGIS/OSM).
+  const routed = await fetchRouteWithSpeeds(vehicle.lat, vehicle.lng, mission.lat, mission.lng);
+  setVehicleRoute(vehicle, routed.coords, routed.flowKmh);
 
   const eta = simulateEtaSeconds(vehicle);
-  showToast(`Traseu ${vehicle.routeTotalKm.toFixed(1)} km - sosire in ~${formatDuration(eta)}`, 'info');
+  showToast(`Traseu ${vehicle.routeTotalKm.toFixed(1)} km${vehicle.roadDataReal ? ' (limite reale de drum)' : ''} - sosire in ~${formatDuration(eta)}`, 'info');
 
   saveState();
   renderUI();
@@ -407,8 +432,8 @@ async function completeMissionWork(vehicleId) {
   const station = state.stations.find(s => s.id === vehicle.stationId);
   if (station) {
     vehicle.status = 'returning'; // setVehicleRoute() o repune pe loc (viteza 0)
-    const returnRoute = await fetchOSRMRoute(vehicle.lat, vehicle.lng, station.lat, station.lng);
-    setVehicleRoute(vehicle, returnRoute);
+    const routedBack = await fetchRouteWithSpeeds(vehicle.lat, vehicle.lng, station.lat, station.lng);
+    setVehicleRoute(vehicle, routedBack.coords, routedBack.flowKmh);
   } else {
     vehicle.status = 'idle';
     vehicle.missionId = null;
