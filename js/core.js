@@ -281,13 +281,35 @@ function roadClassFromRef(ref) {
   return null;
 }
 
-// Un pas de drum e urban daca are intersectii dese.
+// Densitatea de intersectii a unui pas de drum (intersectii per km).
+
+function stepIntersectionDensity(step) {
+  const distKm = (step.distance || 0) / 1000;
+  return distKm > 0 ? (step.intersections || []).length / distKm : 99;
+}
+
+// "Zona urbana" pentru ETICHETA din popup. Pragul vechi (>6 intersectii/km) marca
+// drept urban si un DN de 2,7 km cu 18 intersectii (drumuri laterale, sate), deci
+// pe harta nu aparea niciodata "drum national". Orasul = 1 intersectie la ~100 m
+// (peste 10/km) SAU drumul rupt in bucati mici, des intersectate.
 
 function stepLooksUrban(step) {
   const distKm = (step.distance || 0) / 1000;
   if (distKm <= 0.05) return true;
-  const intersections = (step.intersections || []).length;
-  return intersections / distKm > 6;
+  const density = stepIntersectionDensity(step);
+  if (density > 10) return true;
+  if (density > 5 && distKm < 0.6) return true;
+  return false;
+}
+
+// "Zona construita" pentru LIMITA DE VITEZA: acelasi semnal, dar cu pragul vechi
+// (>6/km). Pe un DN care trece prin sat nu urcam limita la cea de clasa (100 km/h),
+// chiar daca eticheta arata corect clasa drumului.
+
+function stepLooksBuiltUp(step) {
+  const distKm = (step.distance || 0) / 1000;
+  if (distKm <= 0.05) return true;
+  return stepIntersectionDensity(step) > 6;
 }
 
 // Distantele cumulative ale steps-urilor, ca sa stim ce clasa de drum e la fiecare km.
@@ -303,6 +325,7 @@ function buildRoadRanges(steps) {
       to: acc + dKm,
       cls: roadClassFromRef(step.ref),
       urban: stepLooksUrban(step),
+      builtUp: stepLooksBuiltUp(step),
       ref: step.ref || null
     });
     acc += dKm;
@@ -326,8 +349,11 @@ function roadInfoAt(ranges, dKm, totalKm) {
 
 function roadLabelFor(vehicle, idx, roadLimit) {
   const info = vehicle.routeRoadInfo && vehicle.routeRoadInfo[idx];
-  if (info && info.cls && !info.urban) {
-    return ROAD_CLASS_LABEL[info.cls] + (info.ref ? ' (' + info.ref + ')' : '');
+  // Daca stim numarul drumului (DN/DJ/A), il aratam MEREU - si in localitate
+  // ("drum național (DN2) · zonă urbană"); altfel clasa reala nu se vedea niciodata.
+  if (info && info.cls) {
+    const label = ROAD_CLASS_LABEL[info.cls] + (info.ref ? ' (' + info.ref + ')' : '');
+    return info.urban ? label + ' · zonă urbană' : label;
   }
   if (info && info.urban) return 'zonă urbană';
   return roadKindLabel(roadLimit);
@@ -384,7 +410,7 @@ function buildSegmentProfile(route, flowKmh, roadRanges) {
     // mai mare decat da OSM (care pune des 50 km/h si pe drumurile judetene).
     const info = roadInfoAt(roadRanges, cumKm, totalKm);
     roadInfo[j] = info;
-    if (info && info.cls && !info.urban) {
+    if (info && info.cls && !info.builtUp) {
       const base = ROAD_CLASS_BASE_KMH[info.cls] || 0;
       if (base > roadLimit) roadLimit = base;
     }

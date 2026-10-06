@@ -274,11 +274,23 @@ const ROUTE_PROVIDERS = [
   'https://router.project-osrm.org/route/v1/driving'
 ];
 
+// Fara timeout, un fetch agatat lasa echipajul vesnic in drum (si, la intoarcere,
+// vesnic pe scena). 8 s e destul pentru o ruta de oras; apoi cade pe providerul
+// urmator, respectiv pe ruta liniara.
+const ROUTE_FETCH_TIMEOUT_MS = 8000;
+
 async function fetchRouteWithSpeeds(startLat, startLng, endLat, endLng) {
   for (let i = 0; i < ROUTE_PROVIDERS.length; i++) {
     try {
       const url = `${ROUTE_PROVIDERS[i]}/${startLng},${startLat};${endLng},${endLat}?overview=full&geometries=geojson&annotations=speed&steps=true`;
-      const res = await fetch(url);
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), ROUTE_FETCH_TIMEOUT_MS);
+      let res;
+      try {
+        res = await fetch(url, { signal: ctrl.signal });
+      } finally {
+        clearTimeout(timer);
+      }
       const data = await res.json();
 
       if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
@@ -415,11 +427,18 @@ function startGameLoop() {
   }, 300);
 }
 
+// Echipaje cu intoarcerea la baza in curs (memorie, nu se persista): daca timerul
+// de interventie ruleaza de doua ori (unul din memorie + unul restaurat dupa reload),
+// al doilea apel iese imediat.
+const returningInFlight = new Set();
+
 async function completeMissionWork(vehicleId) {
   const vehicle = state.vehicles.find(v => v.id === vehicleId);
   // Guard: previne dubla recompensa daca timerul de interventie ruleaza de doua ori
   // (unul din memorie + unul restaurat dupa reload).
   if (!vehicle || vehicle.status !== 'on_scene') return;
+  if (returningInFlight.has(vehicle.id)) return;
+  returningInFlight.add(vehicle.id);
 
   const missionIndex = state.missions.findIndex(m => m.id === vehicle.missionId);
   if (missionIndex !== -1) {
@@ -437,15 +456,25 @@ async function completeMissionWork(vehicleId) {
   // Return vehicle to station
   const station = state.stations.find(s => s.id === vehicle.stationId);
   if (station) {
-    vehicle.status = 'returning'; // setVehicleRoute() o repune pe loc (viteza 0)
+    // BUG REPARAT ("masina nu se intoarce in baza"): inainte statusul devenea
+    // 'returning' INAINTE de await-ul pe ruta de intors. Cat se descarca ruta
+    // (200-800 ms), bucla de joc (300 ms) vedea tot vechea ruta - deja parcursa,
+    // distKm la capat - declara sosirea, muta echipajul pe 'idle' si il teleporta
+    // in baza; apoi setVehicleRoute() rescria lat/lng la locul interventiei, cu
+    // status 'idle' -> masina aparea parcata la fata locului, "disponibila".
+    // Ordinea corecta: intai ruta, apoi statusul. Cat asteptam, echipajul ramane
+    // 'on_scene', deci bucla de joc nu-l atinge.
     const routedBack = await fetchRouteWithSpeeds(vehicle.lat, vehicle.lng, station.lat, station.lng);
     setVehicleRoute(vehicle, routedBack.coords, routedBack.flowKmh, routedBack.roadRanges);
+    vehicle.status = 'returning'; // setVehicleRoute() o repune pe loc (viteza 0)
   } else {
     vehicle.status = 'idle';
     vehicle.missionId = null;
     vehicle.route = [];
     vehicle.routeCum = [];
   }
+
+  returningInFlight.delete(vehicle.id);
 
   saveState();
   renderUI();

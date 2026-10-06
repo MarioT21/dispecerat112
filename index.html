@@ -277,15 +277,17 @@
             <i class="fa-solid fa-layer-group text-cyan-400 mr-1"></i> Stil Hartă Dispecerat
           </label>
           <div class="grid grid-cols-1 gap-2">
-            <button onclick="changeMapTile('dark')" class="py-2 px-3 rounded-lg bg-slate-800 border border-cyan-500/50 text-cyan-400 text-xs text-left font-semibold flex items-center justify-between">
+            <button id="tile-btn-dark" onclick="changeMapTile('dark')" class="py-2 px-3 rounded-lg bg-slate-800 border border-cyan-500/50 text-cyan-400 text-xs text-left font-semibold flex items-center justify-between">
               <span><i class="fa-solid fa-moon mr-2"></i> Dark Tactical (CartoDB)</span>
-              <i class="fa-solid fa-check"></i>
+              <i class="fa-solid fa-check tile-check"></i>
             </button>
-            <button onclick="changeMapTile('osm')" class="py-2 px-3 rounded-lg bg-slate-800/60 hover:bg-slate-800 text-slate-300 text-xs text-left font-semibold flex items-center justify-between">
+            <button id="tile-btn-osm" onclick="changeMapTile('osm')" class="py-2 px-3 rounded-lg bg-slate-800/60 hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs text-left font-semibold flex items-center justify-between">
               <span><i class="fa-solid fa-map mr-2"></i> OpenStreetMap Standard</span>
+              <i class="fa-solid fa-check tile-check hidden"></i>
             </button>
-            <button onclick="changeMapTile('satellite')" class="py-2 px-3 rounded-lg bg-slate-800/60 hover:bg-slate-800 text-slate-300 text-xs text-left font-semibold flex items-center justify-between">
+            <button id="tile-btn-satellite" onclick="changeMapTile('satellite')" class="py-2 px-3 rounded-lg bg-slate-800/60 hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs text-left font-semibold flex items-center justify-between">
               <span><i class="fa-solid fa-globe mr-2"></i> Satelit Esri Hibrid</span>
+              <i class="fa-solid fa-check tile-check hidden"></i>
             </button>
           </div>
         </div>

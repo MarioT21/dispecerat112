@@ -51,6 +51,26 @@ function setMapTileProvider(styleKey) {
 
   state.mapTileStyle = styleKey;
   saveState();
+  updateMapTileButtons();
+}
+
+// BUG REPARAT: clasa de activ + bifa erau hardcodate pe butonul "Dark Tactical",
+// asa ca highlight-ul ramanea pe el oricat schimbai stilul. Acum se randeaza din state.
+
+function updateMapTileButtons() {
+  ['dark', 'osm', 'satellite'].forEach(key => {
+    const btn = document.getElementById('tile-btn-' + key);
+    if (!btn || !btn.classList) return;
+    const active = state.mapTileStyle === key;
+    btn.classList.toggle('bg-slate-800', active);
+    btn.classList.toggle('bg-slate-800/60', !active);
+    btn.classList.toggle('text-cyan-400', active);
+    btn.classList.toggle('text-slate-300', !active);
+    btn.classList.toggle('border-cyan-500/50', active);
+    btn.classList.toggle('border-slate-800', !active);
+    const check = btn.querySelector ? btn.querySelector('.tile-check') : null;
+    if (check && check.classList) check.classList.toggle('hidden', !active);
+  });
 }
 
 function changeMapTile(key) {
