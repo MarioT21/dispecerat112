@@ -322,11 +322,19 @@ function restoreOpenVehiclePopup() {
 function vehicleStatusLabel(vehicle) {
   if (vehicle.status === 'dispatched') return 'In deplasare spre intervenție';
   if (vehicle.status === 'on_scene') return 'Intervine la fața locului';
+  if (vehicle.status === 'refilling') {
+    if (vehicle.hydrantPhase === 'filling') return 'Alimentează cu apă la ' + (vehicle.hydrantName || 'hidrant');
+    if (vehicle.hydrantPhase === 'back') return 'Rezervor plin — se întoarce la incendiu';
+    return 'În deplasare la alimentare cu apă';
+  }
   if (vehicle.status === 'returning') return 'Se întoarce la subunitate';
   return 'Disponibil în garaj';
 }
 
 function vehicleDestinationLabel(vehicle) {
+  if (vehicle.status === 'refilling' && vehicle.hydrantPhase !== 'back') {
+    return vehicle.hydrantName || 'punct de alimentare';
+  }
   if (vehicle.missionId) {
     const m = state.missions.find(x => x.id === vehicle.missionId);
     if (m) return m.title;
@@ -338,7 +346,8 @@ function vehicleDestinationLabel(vehicle) {
 // Viteza instanta + limita de drum estimata + distanta ramasa + ETA.
 
 function vehiclePopupHtml(vehicle) {
-  const moving = (vehicle.status === 'dispatched' || vehicle.status === 'returning') &&
+  const moving = (vehicle.status === 'dispatched' || vehicle.status === 'returning' ||
+                  vehicle.status === 'refilling') &&
                  !!vehicle.route && vehicle.route.length > 1;
   const speed = Math.round(vehicle.speedKmh || 0);
   const totalKm = vehicle.routeTotalKm || 0;

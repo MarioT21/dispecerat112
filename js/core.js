@@ -16,6 +16,9 @@ let state = {
   maxDistanceKm: 25,
   showCoverageCircles: true,
   escalationEnabled: true, // raport de la fata locului: nevoile reale se afla la sosire
+  fleetAwareCalls: true,   // apelurile se potrivesc cu flota: fara SMURD, nu vin urgente medicale
+  missionsPaused: false,   // pauza: fara apeluri noi, fara expirari, fara deplasare
+  hydrants: [],            // puncte de alimentare (pentru mai tarziu; acum se folosesc subunitatile)
   mapTileStyle: 'dark',
   stations: [], // { id, name, lat, lng }
   vehicles: [], // { id, stationId, type, name, waterCap, compartments, status: 'idle'|'dispatched'|'on_scene'|'returning', lat, lng, route: [], routeIdx: 0, missionId: null }
@@ -162,8 +165,10 @@ const MAX_PENDING_CALLS = 8;
 const MAX_ACTIVE_MISSIONS = 14;
 
 // Procentul din recompensa pierdut cand un apel expira nerezolvat.
+// Mario a cerut (2026-10-11) sa NU se mai penalizeze deocamdata: 0 = fara penalizare.
+// Pune 0.5 inapoi daca vrei sa doara din nou.
 
-const MISSION_FAIL_PENALTY = 0.5;
+const MISSION_FAIL_PENALTY = 0;
 
 const MAX_VEHICLES_PER_STATION = 10;
 
@@ -331,6 +336,44 @@ function missionUnits(mission) {
 
 function missionUnitsOnScene(mission) {
   return state.vehicles.filter(v => v.missionId === mission.id && v.status === 'on_scene');
+}
+
+// --- Flota: apelurile se potrivesc cu masinile din garaj -----------------
+// Cate echipaje de tipul (si cu modulul) cerut are flota - ocupate sau nu.
+function fleetCount(kind, requires) {
+  return state.vehicles.filter(v => v.type === kind && vehicleHasModule(v, requires)).length;
+}
+
+// Adapteaza nevoile unei misiuni la flota existenta: Reduce numarul de locuri la cate
+// echipaje exista si intoarce null cand lipseste COMPLET tipul/modulul cerut (misiunea
+// nu se mai genereaza deloc: "daca nu am un anumit tip de masina, nu-mi da misiuni").
+function adaptNeedsToFleet(needs) {
+  const out = [];
+  for (let i = 0; i < needs.length; i++) {
+    const n = needs[i];
+    const have = fleetCount(n.kind, n.requires);
+    if (have <= 0) return null;
+    out.push({
+      kind: n.kind,
+      count: Math.min(n.count, have),
+      requires: n.requires || null,
+      label: n.label || TYPE_LABEL[n.kind] || n.kind
+    });
+  }
+  return out;
+}
+
+// Punctul de alimentare cu apa al autospecialelor. Momentan: cea mai apropiata
+// subunitate (sau hidrantii din `state.hydrants`, cand vor exista pe harta).
+function nearestHydrant(lat, lng) {
+  const pts = (state.hydrants || []).map(h => ({ lat: h.lat, lng: h.lng, name: h.name || 'Hidrant' }));
+  state.stations.forEach(s => pts.push({
+    lat: s.lat, lng: s.lng,
+    name: /^subunit/i.test(s.name || '') ? s.name : 'Subunitatea ' + (s.name || 'din zonă')
+  }));
+  if (!pts.length) return { lat: lat, lng: lng, name: 'punct de alimentare' };
+  pts.sort((a, b) => haversineKm(lat, lng, a.lat, a.lng) - haversineKm(lat, lng, b.lat, b.lng));
+  return pts[0];
 }
 
 // Eticheta din UI a unei nevoi: "Pompieri (Descarcerare)".

@@ -27,6 +27,23 @@ function renderUI() {
   const escToggle = document.getElementById('toggle-escalation');
   if (escToggle) escToggle.checked = state.escalationEnabled !== false;
 
+  // Apeluri in functie de flota - implicit pornit.
+  const fleetToggle = document.getElementById('toggle-fleet-aware');
+  if (fleetToggle) fleetToggle.checked = state.fleetAwareCalls !== false;
+
+  // Butonul de pauza + banner-ul de pauza.
+  const pauseBtn = document.getElementById('btn-pause-missions');
+  if (pauseBtn) {
+    pauseBtn.innerHTML = state.missionsPaused
+      ? '<i class="fa-solid fa-play"></i> Reia'
+      : '<i class="fa-solid fa-pause"></i> Pauză';
+    pauseBtn.className = state.missionsPaused
+      ? 'px-2.5 py-1.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 text-slate-950 text-[11px] font-bold flex items-center gap-1.5 transition'
+      : 'px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] font-semibold flex items-center gap-1.5 transition';
+  }
+  const pauseBanner = document.getElementById('pause-banner');
+  if (pauseBanner) pauseBanner.classList.toggle('hidden', !state.missionsPaused);
+
   // Viteza simularii (slider din Setari) - sincronizata cu valoarea reala.
   const simSlider = document.getElementById('input-sim-speed');
   if (simSlider) {
@@ -138,6 +155,7 @@ function renderMissionsList() {
       <div class="flex justify-between items-start gap-2">
         <div class="flex items-center gap-1.5 flex-wrap">
           <span class="text-[10px] px-1.5 py-0.5 rounded border ${pr.badgeClass} font-bold" title="${pr.name}">${pr.label}</span>
+          ${mission.relaxed ? '<span class="text-[10px] px-1.5 py-0.5 rounded border bg-slate-800 text-slate-300 border-slate-600 font-bold" title="Misiune fără urgență: nu expiră">FĂRĂ TERMEN</span>' : ''}
           <span class="text-xs px-2 py-0.5 rounded border ${badgeColor} font-bold uppercase tracking-wider">
             ${TYPE_LABEL[mission.reqType] || mission.type.toUpperCase()}
           </span>
@@ -202,6 +220,8 @@ function renderStationsList() {
           if (v.status === 'dispatched') statusBadge = '<span class="text-[10px] text-amber-400 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800">În deplasare</span>';
           if (v.status === 'on_scene') statusBadge = '<span class="text-[10px] text-red-400 bg-red-950/60 px-2 py-0.5 rounded border border-red-800">Intervine</span>';
           if (v.status === 'returning') statusBadge = '<span class="text-[10px] text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-800">Se întoarce</span>';
+          if (v.status === 'refilling') statusBadge = '<span class="text-[10px] text-cyan-300 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800">' +
+            (v.hydrantPhase === 'filling' ? 'Alimentează cu apă' : 'La hidrant') + '</span>';
 
           return `
             <div class="bg-slate-950/80 p-2 rounded-lg border border-slate-800/80 flex items-center justify-between text-xs">
@@ -234,7 +254,13 @@ function updateMissionTimers() {
   state.missions.forEach(m => {
     const el = document.getElementById('timer-' + m.id);
     if (!el) return;
-    if (m.status !== 'active' || !m.deadline) {
+    if (!m.deadline) {
+      // Misiunile relaxate (eveniment public, transfer inter-spitale) n-au termen.
+      el.textContent = 'fără termen';
+      el.className = 'font-orbitron text-[11px] font-bold text-slate-500';
+      return;
+    }
+    if (m.status !== 'active') {
       el.textContent = 'în intervenție';
       el.className = 'font-orbitron text-[11px] font-bold text-amber-400';
       return;
@@ -296,4 +322,17 @@ function toggleEscalation(enabled) {
   showToast(state.escalationEnabled
     ? 'Raport de la fața locului: ACTIV — nevoile reale se află la sosirea echipajelor.'
     : 'Raport de la fața locului: oprit (nevoile rămân cele de la apel).', 'info');
+}
+
+
+// Setarea "apeluri in functie de flota": cand e pornita, nu vin misiuni care cer un
+// tip de masina (sau un modul) pe care nu il ai deloc in garaj, iar numarul de echipaje
+// cerute se micsoreaza la cate exista. Cand nu se poate acoperi nimic urgent, raman
+// misiunile fara termen (eveniment public, transfer inter-spitale, verificare sesizare).
+function toggleFleetAwareCalls(enabled) {
+  state.fleetAwareCalls = !!enabled;
+  saveState();
+  showToast(state.fleetAwareCalls
+    ? 'Apeluri adaptate la flotă: nu vin misiuni pentru echipaje pe care nu le ai.'
+    : 'Apeluri clasice: pot veni și misiuni pe care nu le poți acoperi.', 'info');
 }

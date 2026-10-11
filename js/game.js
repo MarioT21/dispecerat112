@@ -33,7 +33,11 @@ function recoverStuckVehicles() {
       if (v.workEndsAt == null) v.workEndsAt = Date.now() + 5000;
       if (v.type === 'fire_custom' && v.waterLeft == null) v.waterLeft = v.waterCap || 0;
       setTimeout(() => completeMissionWork(v.id), 5000);
-    } else if (v.status === 'dispatched' || v.status === 'returning') {
+    } else if (v.status === 'refilling' && v.hydrantPhase === 'filling') {
+      // Era la hidrant cand s-a dat reload: lasa-l sa termine incarcarea.
+      if (!v.fillUntil) v.fillUntil = Date.now() + 3000;
+      changed = true;
+    } else if (v.status === 'dispatched' || v.status === 'returning' || v.status === 'refilling') {
       if (v.route && v.route.length > 1) {
         // Ruta a fost persistata -> reconstruim distantele cumulative.
         const metrics = buildRouteMetrics(v.route);
@@ -284,8 +288,70 @@ const MISSION_TEMPLATES = [
     victims: () => 0,
     needs: () => [{ kind: 'police', count: 2, label: 'Intervenție' }],
     water: () => 0
+  },
+  // --- Misiuni FARA URGENTA (`relaxed`): nu au termen limita, nu penalizeaza nimic si
+  // sunt folosite cand flota e ocupata sau nu poate acoperi o urgenta (cerut de Mario).
+  {
+    id: 'eveniment_public', kind: 'police', priority: 'p3', relaxed: true,
+    title: 'Asigurare Eveniment Public', reward: 4500,
+    victims: () => 0,
+    needs: () => [{ kind: 'police', count: 1, label: 'Asigurare / ordine' }],
+    water: () => 0
+  },
+  {
+    id: 'transfer_spital', kind: 'smurd', priority: 'p3', relaxed: true,
+    title: 'Transfer Inter-Spitale', reward: 4000,
+    victims: () => 0,
+    needs: () => [{ kind: 'smurd', count: 1, label: 'Transfer pacient' }],
+    water: () => 0
+  },
+  {
+    id: 'verificare_sesizare', kind: 'police', priority: 'p3', relaxed: true,
+    title: 'Verificare Sesizare (fără urgență)', reward: 3000,
+    victims: () => 0,
+    needs: () => [{ kind: 'police', count: 1, label: 'Verificare' }],
+    water: () => 0
   }
 ];
+
+// Alege template-ul potrivit flotei. Intai urgentele care se pot acoperi, apoi
+// misiunile relaxate (fara termen). Intoarce null cand flota nu poate acoperi nimic.
+function pickTemplateForFleet() {
+  const fleetAware = state.fleetAwareCalls !== false;
+  const groups = [
+    MISSION_TEMPLATES.filter(t => !t.relaxed),
+    MISSION_TEMPLATES.filter(t => !!t.relaxed)
+  ];
+  for (let g = 0; g < groups.length; g++) {
+    const pool = shuffleCopy(groups[g]);
+    for (let i = 0; i < pool.length; i++) {
+      const t = pool[i];
+      const victims = t.victims ? t.victims() : 0;
+      const raw = t.needs({ victims: victims });
+      let needs;
+      if (fleetAware) {
+        needs = adaptNeedsToFleet(raw); // null = lipseste complet tipul/modulul cerut
+        if (!needs) continue;
+      } else {
+        needs = raw.map(n => ({
+          kind: n.kind, count: n.count, requires: n.requires || null,
+          label: n.label || TYPE_LABEL[n.kind] || n.kind
+        }));
+      }
+      return { template: t, victims: victims, needs: needs };
+    }
+  }
+  return null;
+}
+
+function shuffleCopy(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = a[i]; a[i] = a[j]; a[j] = tmp;
+  }
+  return a;
+}
 
 // ------------------------------------------------------------------------
 // 112 EMERGENCY CALL GENERATOR & DISTANCE FILTER
@@ -294,6 +360,7 @@ const MISSION_TEMPLATES = [
 function startCallGeneratorTimer() {
   setInterval(() => {
     if (state.stations.length === 0) return;
+    if (state.missionsPaused) return; // pauza: nu vin apeluri noi
     // La timp real un echipaj e plecat minute intregi, deci se numara doar
     // apelurile inca nedispecerizate, plus un plafon total de siguranta.
     const pending = state.missions.filter(m => m.status === 'active').length;
@@ -305,6 +372,7 @@ function startCallGeneratorTimer() {
 
 function generateRandom112Call() {
   if (state.stations.length === 0) return;
+  if (state.missionsPaused) return; // pauza de misiuni
 
   // Generam in jurul unei subunitati, apoi VALIDAM fata de cea mai apropiata
   // subunitate - altfel, cu mai multe subunitati, cercul afisat nu corespunde
@@ -328,14 +396,20 @@ function generateRandom112Call() {
   const callLng = pick.lng;
   const nearest = pick.info;
 
-  const template = MISSION_TEMPLATES[Math.floor(Math.random() * MISSION_TEMPLATES.length)];
-  const victims = template.victims ? template.victims() : 0;
-  const needs = template.needs({ victims: victims }).map(n => ({
-    kind: n.kind,
-    count: n.count,
-    requires: n.requires || null,
-    label: n.label || TYPE_LABEL[n.kind] || n.kind
-  }));
+  // Alegem un template pe care FLOTA il poate acoperi (cerut de Mario: "daca nu mai am
+  // un anumit tip de masina, nu-mi mai da misiuni"). Nevoile se adapteaza la cate
+  // echipaje exista; cand nu se poate acoperi nimic urgent, raman misiunile relaxate.
+  const choice = pickTemplateForFleet();
+  if (!choice) {
+    if (!state.lastNoFleetNoticeAt || Date.now() - state.lastNoFleetNoticeAt > 120000) {
+      state.lastNoFleetNoticeAt = Date.now();
+      showToast('Niciun apel nou: flota nu poate acoperi urgențele din zonă. Cumpără echipaje în Subunități.', 'warning');
+    }
+    return;
+  }
+  const template = choice.template;
+  const victims = choice.victims;
+  const needs = choice.needs;
 
   const mission = {
     id: 'm_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
@@ -354,7 +428,8 @@ function generateRandom112Call() {
     district: nearest.station ? nearest.station.name : null,
     distanceKm: +nearest.km.toFixed(2),
     createdAt: Date.now(),
-    deadline: Date.now() + priorityOf(template).timeoutSec * 1000,
+    deadline: template.relaxed ? null : Date.now() + priorityOf(template).timeoutSec * 1000,
+    relaxed: !!template.relaxed,
     reportedAt: null,
     escalated: false,
     status: 'active'
@@ -365,7 +440,8 @@ function generateRandom112Call() {
   const needTxt = mission.needs
     .map(n => n.count + '× ' + (TYPE_LABEL[n.kind] || n.kind) + (n.requires ? '/' + n.requires : ''))
     .join(' + ');
-  showToast(`APEL NOU 112 [${priorityOf(mission).label}] ${mission.title} (${mission.distanceKm.toFixed(1)} km) — necesar: ${needTxt}`, 'warning');
+  const termenTxt = mission.relaxed ? 'FĂRĂ TERMEN' : `[${priorityOf(mission).label}]`;
+  showToast(`APEL NOU 112 ${termenTxt} ${mission.title} (${mission.distanceKm.toFixed(1)} km) — necesar: ${needTxt}`, 'warning');
 
   saveState();
   renderUI();
@@ -507,8 +583,13 @@ function startGameLoop() {
     const dtSec = Math.min((now - lastTick) / 1000, 2);
     lastTick = now;
 
+    // Cu misiunile in pauza nu se intampla nimic: nici apeluri, nici expirari, nici
+    // deplasare, nici munca la fata locului. Termenele se decaleaza la reluare.
+    if (state.missionsPaused) return;
+
     let stateChanged = false;
     checkMissionTimeouts();
+    updateHydrantFills(now);
 
     // Munca la fata locului: stingerea consuma apa, raportul primului echipaj
     // actualizeaza nevoile (escaladare), iar misiunile gata se inchid.
@@ -520,7 +601,8 @@ function startGameLoop() {
     });
 
     state.vehicles.forEach(vehicle => {
-      if ((vehicle.status === 'dispatched' || vehicle.status === 'returning') &&
+      if ((vehicle.status === 'dispatched' || vehicle.status === 'returning' ||
+           vehicle.status === 'refilling') &&
           vehicle.route && vehicle.route.length > 1) {
 
         // BUG REPARAT: inainte se avansa 1 punct la 300ms, deci durata depindea
@@ -531,6 +613,9 @@ function startGameLoop() {
         if (atEnd) {
           if (vehicle.status === 'dispatched') {
             onVehicleArrived(vehicle); // primul echipaj porneste si raportul de la fata locului
+          } else if (vehicle.status === 'refilling') {
+            if (vehicle.hydrantPhase === 'to_water') onHydrantArrived(vehicle, now);
+            else if (vehicle.hydrantPhase === 'back') onWaterBackOnScene(vehicle);
           } else if (vehicle.status === 'returning') {
             vehicle.status = 'idle';
             vehicle.route = [];
@@ -653,23 +738,15 @@ function updateFireWork(mission, dtGame, now) {
     if (v.missionId !== mission.id || v.status !== 'on_scene') return;
     if (!vehicleHasModule(v, 'Stingere')) return;
 
-    if (v.refillUntil) {
-      if (now >= v.refillUntil) {
-        v.refillUntil = null;
-        v.waterLeft = v.waterCap || 0;
-        v.refillNotified = false;
-        changed = true;
-      }
-      return; // plecata la hidrant
-    }
+    if (v.hydrantPhase) return; // plecata spre / la hidrant, sau se intoarce
 
     if (v.waterLeft == null) v.waterLeft = v.waterCap || 0;
     if (v.waterLeft <= 0) {
-      v.refillUntil = now + (FIRE_REFILL_SEC * 1000) / Math.max(1, SIM_SPEED_MULTIPLIER);
       if (!v.refillNotified) {
         v.refillNotified = true;
-        showToast(`${v.name}: rezervor gol, pleacă la hidrant (${FIRE_REFILL_SEC} s).`, 'info');
+        showToast(`${v.name}: rezervor gol — pleacă la alimentare cu apă.`, 'info');
       }
+      startHydrantTrip(v, mission); // autospeciala CHIAR se deplaseaza la hidrant
       changed = true;
       return;
     }
@@ -686,6 +763,66 @@ function updateFireWork(mission, dtGame, now) {
   return changed;
 }
 
+// Alimentarea cu apa: autospeciala se deplaseaza efectiv la punctul de alimentare
+// (cea mai apropiata subunitate / hidrant), sta acolo FIRE_REFILL_SEC si se intoarce
+// la incendiu. Cat e plecata, debitul ei nu mai conteaza.
+// Faze: 'to_water' (in drum spre apa) -> 'filling' (incarca) -> 'back' (se intoarce).
+async function startHydrantTrip(vehicle, mission) {
+  if (!vehicle || !mission || vehicle.hydrantPhase) return;
+  const h = nearestHydrant(mission.lat, mission.lng);
+  vehicle.hydrantPhase = 'to_water';
+  vehicle.hydrantName = h.name;
+  vehicle.status = 'refilling';
+  const routed = await fetchRouteWithSpeeds(vehicle.lat, vehicle.lng, h.lat, h.lng);
+  if (vehicle.status !== 'refilling' || vehicle.hydrantPhase !== 'to_water') return;
+  setVehicleRoute(vehicle, routed.coords, routed.flowKmh, routed.roadRanges);
+  showToast(`${vehicle.name}: se deplasează la ${h.name} pentru alimentare.`, 'info');
+  saveState(); renderUI(); renderMapElements();
+}
+
+// Sosit la punctul de alimentare: umple rezervorul, apoi porneste inapoi.
+function onHydrantArrived(vehicle, now) {
+  vehicle.hydrantPhase = 'filling';
+  vehicle.fillUntil = now + (FIRE_REFILL_SEC * 1000) / Math.max(1, SIM_SPEED_MULTIPLIER);
+  showToast(`${vehicle.name}: alimentează cu apă la ${vehicle.hydrantName || 'hidrant'} (${FIRE_REFILL_SEC} s).`, 'info');
+}
+
+async function resumeFireAfterFill(vehicle, mission) {
+  vehicle.hydrantPhase = 'back';
+  vehicle.fillUntil = null;
+  const routed = await fetchRouteWithSpeeds(vehicle.lat, vehicle.lng, mission.lat, mission.lng);
+  if (vehicle.status !== 'refilling' || vehicle.hydrantPhase !== 'back') return;
+  setVehicleRoute(vehicle, routed.coords, routed.flowKmh, routed.roadRanges);
+  saveState(); renderUI(); renderMapElements();
+}
+
+// Cat timp se incarca, autospeciala sta la hidrant; cand a terminat, pleaca inapoi.
+function updateHydrantFills(now) {
+  state.vehicles.forEach(v => {
+    if (v.status !== 'refilling' || v.hydrantPhase !== 'filling') return;
+    if (v.fillUntil && now < v.fillUntil) return;
+    v.fillUntil = null;
+    const mission = state.missions.find(m => m.id === v.missionId);
+    if (!mission) { // misiunea a disparut intre timp -> inapoi in baza
+      v.hydrantPhase = null;
+      v.waterLeft = v.waterCap || 0;
+      sendVehicleBack(v);
+      return;
+    }
+    resumeFireAfterFill(v, mission);
+  });
+}
+
+// Revenita la incendiu: rezervor plin, reluam stingerea.
+function onWaterBackOnScene(vehicle) {
+  vehicle.hydrantPhase = null;
+  vehicle.refillNotified = false;
+  vehicle.waterLeft = vehicle.waterCap || 0;
+  vehicle.status = 'on_scene';
+  vehicle.workEndsAt = Date.now() + MISSION_WORK_SEC * 1000;
+  showToast(`${vehicle.name}: rezervor plin, reia stingerea.`, 'info');
+}
+
 // Debitul curent livrat la un incendiu (L/s) - pentru afisare in lista de misiuni.
 function fireFlowLps(mission) {
   if (!mission || !mission.waterNeeded) return 0;
@@ -694,7 +831,7 @@ function fireFlowLps(mission) {
   state.vehicles.forEach(v => {
     if (v.missionId !== mission.id || v.status !== 'on_scene') return;
     if (!vehicleHasModule(v, 'Stingere')) return;
-    if (v.refillUntil && now < v.refillUntil) return;
+    if (v.hydrantPhase) return; // la hidrant / in drum
     if ((v.waterLeft || 0) <= 0) return;
     lps += FIRE_PUMP_LPS;
   });
@@ -768,6 +905,39 @@ function dispatchNearestToNeed(missionId, needIdx) {
   dispatchVehicleToMission(candidates[0].id, missionId, needIdx);
 }
 
+// Pauza de misiuni (buton in lista de apeluri): nu vin apeluri noi, nimic nu expira,
+// echipajele si munca la fata locului se opresc. La reluare, toate termenele se
+// decaleaza cu durata pauzei, ca sa nu se piarda timp degeaba.
+function togglePauseMissions(force) {
+  const next = (force === undefined) ? !state.missionsPaused : !!force;
+  if (next === state.missionsPaused) return;
+  const now = Date.now();
+
+  if (next) {
+    state.pauseStartedAt = now;
+  } else if (state.pauseStartedAt) {
+    const dt = now - state.pauseStartedAt;
+    state.missions.forEach(m => {
+      if (m.deadline) m.deadline += dt;
+      if (m.reportedAt) m.reportedAt += dt;
+      if (m.createdAt) m.createdAt += dt;
+    });
+    state.vehicles.forEach(v => {
+      if (v.fillUntil) v.fillUntil += dt;
+      if (v.workEndsAt) v.workEndsAt += dt;
+    });
+    state.pauseStartedAt = null;
+  }
+
+  state.missionsPaused = next;
+  showToast(next
+    ? 'Misiuni în PAUZĂ: nu vin apeluri noi, nu expiră nimic.'
+    : `Misiuni RELUATE${state.pauseStartedAt ? '' : ' — termenele au fost decalate.'}`, 'info');
+  saveState();
+  renderUI();
+  renderMapElements();
+}
+
 // Compat + recuperare dupa reload: marcheaza interventia echipajului ca terminata si
 // reevalueaza misiunea. Finalizarea propriu-zisa (recompensa) o face closeMission(),
 // cand TOATE nevoile misiunii sunt acoperite si munca s-a terminat.
@@ -791,6 +961,9 @@ async function sendVehicleBack(vehicle) {
   vehicle.waterLeft = null;
   vehicle.refillUntil = null;
   vehicle.refillNotified = false;
+  vehicle.hydrantPhase = null;
+  vehicle.hydrantName = null;
+  vehicle.fillUntil = null;
 
   // Return vehicle to station
   const station = state.stations.find(s => s.id === vehicle.stationId);
@@ -828,6 +1001,7 @@ async function sendVehicleBack(vehicle) {
 // pentru totdeauna. Acum expira si se aplica o penalizare.
 
 function checkMissionTimeouts() {
+  if (state.missionsPaused) return; // in pauza nimic nu expira
   const now = Date.now();
   const expired = state.missions.filter(m => m.status === 'active' && m.deadline && now > m.deadline);
   if (expired.length === 0) return;
@@ -838,8 +1012,12 @@ function checkMissionTimeouts() {
     delete dispatchSelections[m.id];
     // Prioritatea conteaza: un P1 ratat doare mai tare decat un scandal de noapte.
     const penalty = Math.round(m.reward * MISSION_FAIL_PENALTY * priorityOf(m).penaltyMul);
-    state.budget = Math.max(0, state.budget - penalty);
-    showToast(`Apel 112 expirat: ${m.title}. Penalizare -${penalty.toLocaleString('ro-RO')} LEI`, 'error');
+    if (penalty > 0) {
+      state.budget = Math.max(0, state.budget - penalty);
+      showToast(`Apel 112 expirat: ${m.title}. Penalizare -${penalty.toLocaleString('ro-RO')} LEI`, 'error');
+    } else {
+      showToast(`Apel 112 expirat: ${m.title}. Echipajele n-au ajuns la timp (fără penalizare).`, 'warning');
+    }
   });
 
   AudioEngine.playTimeoutTone();
