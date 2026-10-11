@@ -23,6 +23,10 @@ function renderUI() {
   document.getElementById('slider-distance-val').textContent = `${state.maxDistanceKm} km`;
   document.getElementById('toggle-coverage-circle').checked = state.showCoverageCircles;
 
+  // Raportul de la fata locului (escaladare) - implicit pornit.
+  const escToggle = document.getElementById('toggle-escalation');
+  if (escToggle) escToggle.checked = state.escalationEnabled !== false;
+
   // Viteza simularii (slider din Setari) - sincronizata cu valoarea reala.
   const simSlider = document.getElementById('input-sim-speed');
   if (simSlider) {
@@ -49,48 +53,95 @@ function renderMissionsList() {
   }
 
   state.missions.forEach(mission => {
+    ensureMissionShape(mission);
+    const pr = priorityOf(mission);
+
     let badgeColor = 'bg-red-950/80 text-red-400 border-red-800';
     if (mission.type === 'police') badgeColor = 'bg-blue-950/80 text-blue-400 border-blue-800';
     if (mission.type === 'smurd') badgeColor = 'bg-emerald-950/80 text-emerald-400 border-emerald-800';
 
-    // Doar echipaje libere SI de tipul cerut de misiune.
-    const availVehicles = state.vehicles.filter(v => v.status === 'idle' && v.type === mission.reqType);
+    const units = missionUnits(mission);
+    const onScene = missionUnitsOnScene(mission);
+    const needsLeft = missionNeedsOpen(mission);
 
+    // Checklist de forte: fiecare nevoie cu locurile ei ocupate / cerute.
+    const needsHtml = (mission.needs || []).map((n, i) => {
+      const assigned = Math.min(needAssignedCount(mission, i), n.count);
+      const done = assigned >= n.count;
+      const cand = state.vehicles.filter(v => v.status === 'idle' && vehicleCoversNeed(v, n));
+      let icon = '<i class="fa-solid fa-hourglass-half text-amber-400"></i>';
+      if (done) icon = '<i class="fa-solid fa-check text-emerald-400"></i>';
+      else if (!cand.length) icon = '<i class="fa-solid fa-ban text-red-400"></i>';
+      return `
+        <div class="flex items-center justify-between text-[11px]">
+          <span class="flex items-center gap-1.5 ${done ? 'text-emerald-400' : 'text-slate-300'}">${icon}${missionNeedLabel(n)}</span>
+          <span class="font-orbitron ${done ? 'text-emerald-400' : 'text-amber-400'}">${assigned}/${n.count}</span>
+        </div>`;
+    }).join('');
+
+    // Bara de apa: cat s-a livrat din cat e nevoie si cu ce debit se lucreaza acum.
+    let waterHtml = '';
+    if (mission.waterNeeded > 0) {
+      const pct = Math.min(100, Math.round((mission.waterDelivered / mission.waterNeeded) * 100));
+      const flow = fireFlowLps(mission);
+      waterHtml = `
+        <div class="space-y-1">
+          <div class="flex justify-between text-[10px] text-slate-400">
+            <span><i class="fa-solid fa-droplet mr-1 text-cyan-400"></i>Apă livrată</span>
+            <span class="font-orbitron">${Math.round(mission.waterDelivered)} / ${mission.waterNeeded} L</span>
+          </div>
+          <div class="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+            <div class="h-full bg-cyan-500" style="width:${pct}%"></div>
+          </div>
+          <div class="text-[10px] text-slate-500">${flow} L/s acum · ${onScene.length} echipaje la fața locului</div>
+        </div>`;
+    }
+
+    // Dispecerizare: un rand per nevoie inca neacoperita (tip + modul obligatoriu).
     let dispatchControlsHtml = '';
-    if (mission.status === 'assigned') {
+    if (!needsLeft) {
       dispatchControlsHtml = `
         <div class="text-xs text-amber-400 font-medium flex items-center gap-2 pt-2 border-t border-slate-800">
-          <i class="fa-solid fa-spinner animate-spin"></i> Echipaj în deplasare...
-        </div>`;
-    } else if (availVehicles.length === 0) {
-      dispatchControlsHtml = `
-        <div class="text-[11px] text-red-400 pt-2 border-t border-slate-800">
-          Niciun echipaj de tip <b>${TYPE_LABEL[mission.reqType] || mission.reqType}</b> disponibil!
+          <i class="fa-solid fa-spinner animate-spin"></i> Forțe complete — ${units.length} trimise, ${onScene.length} la fața locului
         </div>`;
     } else {
-      const selected = dispatchSelections[mission.id];
-      dispatchControlsHtml = `
-        <div class="pt-2 border-t border-slate-800 space-y-2">
-          <label class="text-[10px] text-slate-400 uppercase font-semibold">Trimite Echipaj Disponibil:</label>
-          <div class="flex gap-2">
-            <select id="select-dispatch-${mission.id}" onchange="rememberDispatchSelection('${mission.id}', this.value)" class="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-200">
-              ${availVehicles.map(v => `<option value="${v.id}" ${v.id === selected ? 'selected' : ''}>${v.name}</option>`).join('')}
-            </select>
-            <button onclick="dispatchVehicleToMission(document.getElementById('select-dispatch-${mission.id}').value, '${mission.id}')" class="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs rounded-lg shadow-md">
-              Trimite
-            </button>
-          </div>
-        </div>`;
+      dispatchControlsHtml = (mission.needs || []).map((n, i) => {
+        if (!needOpen(mission, i)) return '';
+        const key = needSlotKey(mission.id, i);
+        const avail = state.vehicles.filter(v => v.status === 'idle' && vehicleCoversNeed(v, n));
+        const reqTxt = n.requires ? ` — ai nevoie de o autospecială cu modulul <b>${n.requires}</b>` : '';
+        if (!avail.length) {
+          return `
+            <div class="text-[11px] text-red-400 pt-2 border-t border-slate-800">
+              Niciun echipaj disponibil pentru <b>${missionNeedLabel(n)}</b>${reqTxt}!
+            </div>`;
+        }
+        const selected = dispatchSelections[key];
+        return `
+          <div class="pt-2 border-t border-slate-800 space-y-2">
+            <label class="text-[10px] text-slate-400 uppercase font-semibold">Trimite pentru: ${missionNeedLabel(n)}</label>
+            <div class="flex gap-2">
+              <select id="select-dispatch-${key}" onchange="rememberDispatchSelection('${key}', this.value)" class="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-200">
+                ${avail.map(v => `<option value="${v.id}" ${v.id === selected ? 'selected' : ''}>${v.name}</option>`).join('')}
+              </select>
+              <button onclick="dispatchVehicleToMission(document.getElementById('select-dispatch-${key}').value, '${mission.id}', ${i})" class="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs rounded-lg shadow-md">Trimite</button>
+              <button onclick="dispatchNearestToNeed('${mission.id}', ${i})" title="Trimite cel mai apropiat echipaj" class="px-2.5 py-1.5 bg-emerald-600/80 hover:bg-emerald-500 text-slate-950 font-bold text-xs rounded-lg shadow-md"><i class="fa-solid fa-bolt"></i></button>
+            </div>
+          </div>`;
+      }).join('');
     }
 
     const distLabel = (mission.distanceKm != null) ? `${mission.distanceKm.toFixed(1)} km` : '?';
     const card = document.createElement('div');
     card.className = 'glass-panel p-3 rounded-xl space-y-2 border border-slate-800 hover:border-slate-700 transition';
     card.innerHTML = `
-      <div class="flex justify-between items-start">
-        <span class="text-xs px-2 py-0.5 rounded border ${badgeColor} font-bold uppercase tracking-wider">
-          ${TYPE_LABEL[mission.reqType] || mission.type.toUpperCase()}
-        </span>
+      <div class="flex justify-between items-start gap-2">
+        <div class="flex items-center gap-1.5 flex-wrap">
+          <span class="text-[10px] px-1.5 py-0.5 rounded border ${pr.badgeClass} font-bold" title="${pr.name}">${pr.label}</span>
+          <span class="text-xs px-2 py-0.5 rounded border ${badgeColor} font-bold uppercase tracking-wider">
+            ${TYPE_LABEL[mission.reqType] || mission.type.toUpperCase()}
+          </span>
+        </div>
         <span class="font-orbitron text-xs font-bold text-emerald-400">+${mission.reward.toLocaleString('ro-RO')} LEI</span>
       </div>
       <h4 class="text-sm font-bold text-slate-100">${mission.title}</h4>
@@ -98,6 +149,8 @@ function renderMissionsList() {
         <span><i class="fa-solid fa-location-dot mr-1"></i>${distLabel} · ${mission.district || 'necunoscut'}</span>
         <span id="timer-${mission.id}">--:--</span>
       </div>
+      <div class="space-y-1 pt-1">${needsHtml}</div>
+      ${waterHtml}
       <button onclick="focusMissionOnMap('${mission.id}')" class="w-full py-1 rounded-lg bg-slate-800/60 hover:bg-slate-800 text-slate-300 text-[11px] font-semibold transition">
         <i class="fa-solid fa-crosshairs mr-1"></i> Vezi pe hartă
       </button>
@@ -152,7 +205,10 @@ function renderStationsList() {
 
           return `
             <div class="bg-slate-950/80 p-2 rounded-lg border border-slate-800/80 flex items-center justify-between text-xs">
-              <span class="font-medium text-slate-200">${v.name}</span>
+              <span class="font-medium text-slate-200 flex flex-col">
+                <span>${v.name}</span>
+                ${v.type === 'fire_custom' ? `<span class="text-[10px] text-slate-500">${(v.compartments || []).join(' · ') || 'fără module'}${v.waterCap ? ' · ' + v.waterCap + ' L' : ''}${v.waterLeft != null ? ' · rezervor ' + Math.round(v.waterLeft) + ' L' : ''}</span>` : ''}
+              </span>
               ${statusBadge}
             </div>
           `;
@@ -229,4 +285,15 @@ function toggleMobileMenu(forceState) {
 
 function closeModal(id) {
   document.getElementById(id).classList.add('hidden');
+}
+
+
+// Raportul de la fata locului: cu el pornit, nevoile reale ale unei misiuni se afla
+// abia cand ajunge primul echipaj (victime mai multe, incendiu extins, descarcerare).
+function toggleEscalation(enabled) {
+  state.escalationEnabled = !!enabled;
+  saveState();
+  showToast(state.escalationEnabled
+    ? 'Raport de la fața locului: ACTIV — nevoile reale se află la sosirea echipajelor.'
+    : 'Raport de la fața locului: oprit (nevoile rămân cele de la apel).', 'info');
 }

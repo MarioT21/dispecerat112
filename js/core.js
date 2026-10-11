@@ -15,10 +15,12 @@ let state = {
   budget: 250000,
   maxDistanceKm: 25,
   showCoverageCircles: true,
+  escalationEnabled: true, // raport de la fata locului: nevoile reale se afla la sosire
   mapTileStyle: 'dark',
   stations: [], // { id, name, lat, lng }
   vehicles: [], // { id, stationId, type, name, waterCap, compartments, status: 'idle'|'dispatched'|'on_scene'|'returning', lat, lng, route: [], routeIdx: 0, missionId: null }
-  missions: []  // { id, title, type: 'fire'|'police'|'smurd', reqType, lat, lng, reward, status: 'active'|'assigned'|'completed' }
+  // missions: { id, title, type, priority:'p1'|'p2'|'p3', needs:[{kind,count,requires,label}],
+  //   victims, waterNeeded, waterDelivered, lat, lng, reward, status:'active'|'assigned' }
 };
 
 let pendingStationCoords = null;
@@ -106,7 +108,7 @@ const VEHICLE_SPEEDS = { police: 70, smurd: 65, fire_custom: 50 };
 const VEHICLE_PROFILES = {
   police:      { maxKmh: 150, accel: 3.0, brake: 7.0 },
   smurd:       { maxKmh: 130, accel: 2.4, brake: 6.0 },
-  fire_custom: { maxKmh: 100, accel: 1.5, brake: 4.5 }
+  fire_custom: { maxKmh: 118, accel: 1.7, brake: 5.0 }
 };
 
 function vehicleProfile(vehicle) {
@@ -203,7 +205,140 @@ function turnAngleDeg(lat1, lng1, lat2, lng2, lat3, lng3) {
 // Depasirea e absoluta, nu procentuala: pe o strada de 50 se merge cu ~70-90,
 // pe un drum de 100 cu ~125-145. Ca in realitate, nu o limita fixa pusa la toate.
 
-const OVERTAKE_KMH = { police: 38, smurd: 32, fire_custom: 20 };
+const OVERTAKE_KMH = { police: 38, smurd: 32, fire_custom: 26 };
+
+// =========================================================================
+// SISTEM DE MISIUNI CU FORTE MULTIPLE + STINGERE CU APA (2026-10-11)
+// =========================================================================
+// O misiune nu mai cere "un echipaj de un tip", ci o LISTA DE NEVOI. Fiecare nevoie
+// are un tip, un numar de locuri si, optional, un MODUL obligatoriu - adica unul din
+// compartimentele cumparate in atelier (Stingere / Descarcerare / Prim Ajutor), care
+// pana acum nu erau folosite nicaieri la dispecerizare.
+//   needs = [ { kind:'police', count:2, label:'Perimetru' },
+//             { kind:'fire_custom', count:1, requires:'Descarcerare' } ]
+// Misiunea se inchide doar cand TOATE locurile sunt ocupate, toate echipajele au
+// ajuns la fata locului si munca s-a terminat (la incendii: apa livrata integral).
+
+const PRIORITY_DEF = {
+  p1: { label: 'P1', name: 'Viață în pericol', timeoutSec: 180, penaltyMul: 1.25,
+        badgeClass: 'bg-red-950/80 text-red-400 border-red-700' },
+  p2: { label: 'P2', name: 'Urgență',          timeoutSec: 240, penaltyMul: 1.0,
+        badgeClass: 'bg-amber-950/80 text-amber-400 border-amber-700' },
+  p3: { label: 'P3', name: 'Rutină',           timeoutSec: 360, penaltyMul: 0.6,
+        badgeClass: 'bg-slate-800 text-slate-300 border-slate-600' }
+};
+
+function priorityOf(mission) {
+  return PRIORITY_DEF[(mission && mission.priority) || 'p2'] || PRIORITY_DEF.p2;
+}
+
+// Stingere: fiecare autospeciala varsa FIRE_PUMP_LPS litri/secunda din rezervorul
+// propriu; cand il goleste, pleaca la hidrant si se intoarce dupa FIRE_REFILL_SEC.
+// Deci mai multe autospeciale = mai multe debite in paralel = stingere mai rapida,
+// iar una singura se taraganeaza pana isi reumple rezervorul.
+const FIRE_PUMP_LPS = 40;
+const FIRE_REFILL_SEC = 45;
+
+// Echipaje trimise peste nevoie: fiecare in plus taie EXTRA_UNIT_PENALTY din recompensa.
+const EXTRA_UNIT_PENALTY = 0.12;
+
+// Raportul de la fata locului: dupa atatea secunde de la sosirea primului echipaj
+// dispecerul afla situatia reala (cate victime sunt, cat de mare e incendiul).
+const ESCALATION_REPORT_SEC = 12;
+
+// O misiune veche (fara `needs`) devine o misiune cu o singura nevoie, ca sa nu se
+// sparga salvarile din localStorage si sa functioneze tot ce exista deja.
+function ensureMissionShape(m) {
+  if (!m) return false;
+  let changed = false;
+  if (!Array.isArray(m.needs) || !m.needs.length) {
+    const kind = m.reqType || m.type || 'police';
+    m.needs = [{ kind: kind, count: 1, requires: null, label: TYPE_LABEL[kind] || kind }];
+    changed = true;
+  }
+  if (!m.reqType) { m.reqType = m.needs[0].kind; changed = true; }
+  if (!m.priority) { m.priority = 'p2'; changed = true; }
+  if (m.waterNeeded == null) { m.waterNeeded = 0; changed = true; }
+  if (m.waterDelivered == null) { m.waterDelivered = 0; changed = true; }
+  if (m.victims == null) { m.victims = 0; changed = true; }
+  return changed;
+}
+
+function ensureAllMissionsShape() {
+  let changed = false;
+  state.missions.forEach(m => { if (ensureMissionShape(m)) changed = true; });
+  return changed;
+}
+
+// Are echipajul compartimentul cerut? (fara `requires` orice echipaj de tipul potrivit merge)
+function vehicleHasModule(vehicle, moduleName) {
+  if (!moduleName) return true;
+  return !!(vehicle && Array.isArray(vehicle.compartments) &&
+            vehicle.compartments.indexOf(moduleName) !== -1);
+}
+
+// Echipajul acopera nevoia? Tipul trebuie sa fie identic SI modulul sa existe.
+function vehicleCoversNeed(vehicle, need) {
+  if (!vehicle || !need) return false;
+  if (vehicle.type !== need.kind) return false;
+  return vehicleHasModule(vehicle, need.requires);
+}
+
+// Cheia din UI a unei nevoi (prima nevoie pastreaza id-ul simplu al misiunii).
+function needSlotKey(missionId, idx) { return idx === 0 ? missionId : missionId + '#' + idx; }
+
+// Cate echipaje sunt deja alocate pe nevoia `idx` (in drum sau pe scena).
+// Echipajele salvate inainte de sistemul de nevoi n-au `needIdx`: le socotim pe
+// prima nevoie de tipul lor, altfel misiunea veche ar aparea vesnic neacoperita.
+function needAssignedCount(mission, idx) {
+  const need = (mission.needs || [])[idx];
+  if (!need) return 0;
+  return state.vehicles.filter(v => {
+    if (v.missionId !== mission.id || v.status === 'idle') return false;
+    if (v.needIdx != null) return v.needIdx === idx;
+    return (mission.needs || []).findIndex(n => n.kind === v.type) === idx;
+  }).length;
+}
+
+function needOpen(mission, idx) {
+  const need = (mission.needs || [])[idx];
+  if (!need) return false;
+  return needAssignedCount(mission, idx) < (need.count || 1);
+}
+
+// Prima nevoie deschisa pe care echipajul o poate acoperi (-1 daca nu se potriveste).
+function nextOpenNeedIndex(mission, vehicle) {
+  if (!mission || !Array.isArray(mission.needs)) return -1;
+  for (let i = 0; i < mission.needs.length; i++) {
+    if (needOpen(mission, i) && vehicleCoversNeed(vehicle, mission.needs[i])) return i;
+  }
+  return -1;
+}
+
+function missionNeedsOpen(mission) {
+  if (!mission || !Array.isArray(mission.needs)) return false;
+  return mission.needs.some((n, i) => needOpen(mission, i));
+}
+
+// Numarul total de locuri cerute de misiune (pentru bonusul de eficienta).
+function missionSlotsTotal(mission) {
+  return (mission.needs || []).reduce((s, n) => s + (n.count || 0), 0);
+}
+
+function missionUnits(mission) {
+  return state.vehicles.filter(v => v.missionId === mission.id && v.status !== 'idle');
+}
+
+function missionUnitsOnScene(mission) {
+  return state.vehicles.filter(v => v.missionId === mission.id && v.status === 'on_scene');
+}
+
+// Eticheta din UI a unei nevoi: "Pompieri (Descarcerare)".
+function missionNeedLabel(need) {
+  if (!need) return 'Echipaj';
+  const base = need.label || TYPE_LABEL[need.kind] || need.kind;
+  return need.requires ? base + ' (' + need.requires + ')' : base;
+}
 
 // Limita FIZICA de viraj (nu se depaseste). null = drum drept, fara restrictie.
 

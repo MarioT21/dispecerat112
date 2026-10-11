@@ -251,7 +251,7 @@ function renderMapElements() {
 
     const marker = L.marker([mission.lat, mission.lng], { icon: missionIcon })
       .addTo(map)
-      .bindTooltip(`<b>${mission.title}</b><br>Recompensă: ${mission.reward} LEI`, { direction: 'top' });
+      .bindTooltip(missionTooltipHtml(mission), { direction: 'top' });
 
     mapMarkers.missions[mission.id] = marker;
   });
@@ -408,4 +408,19 @@ function toggleCoverageCircles(show) {
 function focusMissionOnMap(missionId) {
   const m = state.missions.find(x => x.id === missionId);
   if (m) map.flyTo([m.lat, m.lng], 14);
+}
+
+// Tooltip-ul unei misiuni: prioritate, forte cerute (cu locurile ocupate) si apa.
+function missionTooltipHtml(mission) {
+  ensureMissionShape(mission);
+  const pr = priorityOf(mission);
+  const needs = (mission.needs || []).map((n, i) => {
+    const assigned = Math.min(needAssignedCount(mission, i), n.count);
+    const mark = assigned >= n.count ? '✔' : '•';
+    return `${mark} ${missionNeedLabel(n)} ${assigned}/${n.count}`;
+  }).join('<br>');
+  const water = mission.waterNeeded > 0
+    ? `<br>Apă: ${Math.round(mission.waterDelivered)} / ${mission.waterNeeded} L (${fireFlowLps(mission)} L/s)`
+    : '';
+  return `<b>${mission.title}</b><br><span>[${pr.label} — ${pr.name}]</span><br>${needs}${water}<br>Recompensă: ${mission.reward} LEI`;
 }
